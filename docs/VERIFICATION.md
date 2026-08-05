@@ -257,6 +257,36 @@ quality here, and that is the correct trade — but see below, because 0.5× is 
 
 ---
 
+## 9. Silero VAD: implemented, measured, and left switched off
+
+whisper.cpp v1.9.2 ships Silero VAD, and it looked like the obvious fix for Echo's energy gate
+passing 527.9 s of a 600 s chunk. It is wired end to end — 885 KB model, downloaded once,
+`params.vad` set through the JNI — and it makes Hindi **worse**:
+
+| | energy gate only | + Silero VAD |
+|---|---|---|
+| Hindi recall | **0.385** | 0.231 |
+
+The failure mode is legible in the output:
+
+> अच दो पहल कु मीटिं ते चो परे में ते लगत के बारे में **ते लगता है।**
+
+The Hindi initial prompt ends `…आपको क्या लगता है।` — the model is completing the prompt rather
+than transcribing. Silero trims the audio whisper sees; on a short segment the carried prompt
+starts to outweigh what remains, and `carry_initial_prompt` re-applies it to every window. The
+two features fight.
+
+It is left off. The plumbing stays because the idea is still right for long noisy chunks — the
+fixtures here are 4-second clips that are already 100% speech, which is the case Silero can only
+hurt. Anyone re-enabling it should set `engine.vadModelPath`, and should expect to disable
+`carry_initial_prompt` at the same time.
+
+**The general lesson, since it cost a full cycle to learn:** every quality change in this
+pipeline was verified against fixtures with known references before shipping, and this is the
+one that failed. Reasoning about it would have shipped a regression.
+
+---
+
 ## Not yet verified
 
 **The app is not currently installed on the phone.** Gradle's `connectedAndroidTest` uninstalls

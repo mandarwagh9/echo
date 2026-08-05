@@ -108,14 +108,20 @@ class TranscriptionPipeline(
         }
         _state.value = _state.value.copy(modelReady = true)
 
-        // Optional and best-effort: 885 KB, fetched once. If it is not there the
-        // engine falls back to the energy gate rather than refusing to transcribe.
-        if (engine.vadModelPath.isEmpty()) {
-            models.ensureVad()?.let {
-                engine.vadModelPath = it.absolutePath
-                Log.i(TAG, "Silero VAD enabled")
-            }
-        }
+        // Silero VAD is deliberately NOT enabled here, despite the plumbing being
+        // in place and working.
+        //
+        // Measured on the Indic fixtures, turning it on made Hindi *worse*:
+        // word recall fell from 0.385 to 0.231. The failure mode is visible in
+        // the output -- "...ते लगत के बारे में ते लगता है" echoes the tail of the
+        // Hindi initial prompt ("आपको क्या लगता है"). Silero trims the audio
+        // whisper sees, and on a short segment the carried prompt starts to
+        // outweigh what is left, so the model completes the prompt instead of
+        // transcribing. Feeding it whole 10-minute chunks may behave differently,
+        // but "may" is not a reason to ship a measured regression.
+        //
+        // Enable by setting engine.vadModelPath (see ModelManager.ensureVad) and
+        // re-running IndicSpeechInstrumentedTest before believing it helps.
 
         if (chunkDao.claimOldestPending() == 0) return false
         val chunk = chunkDao.currentlyTranscribing() ?: return false
