@@ -29,6 +29,19 @@ data class TranscriptionResult(
  */
 class WhisperEngine {
 
+    private companion object {
+        /**
+         * Above this, whisper itself believes the segment has no speech in it.
+         * The decoder only acts on that internally when the average log-probability
+         * is *also* poor, so a fluent, confident hallucination over room tone still
+         * reaches the caller. Dropping it here is the single most effective filter.
+         */
+        const val NO_SPEECH_MAX = 0.6f
+
+        /** Occurrences of the same normalised text kept per chunk. */
+        const val MAX_REPEATS = 2
+    }
+
     private val mutex = Mutex()
     @Volatile private var ptr: Long = 0
     @Volatile private var loadedPath: String? = null
@@ -87,9 +100,32 @@ class WhisperEngine {
 
         val count = WhisperNative.getTextSegmentCount(p)
         val segments = ArrayList<WhisperSegment>(count)
+
+        // Repetition-loop defence. When the decoder gets stuck it emits the same
+        // phrase over and over ("the security is over" x7). Whisper's internal
+        // thresholds catch some of it, but not a loop that stays confident, so the
+        // surviving output is deduplicated here as well.
+        val seen = HashMap<String, Int>()
+        var dropped = 0
+        var noSpeechDropped = 0
+
         for (i in 0 until count) {
             val text = WhisperNative.getTextSegment(p, i).trim()
             if (text.isEmpty()) continue
+
+            if (WhisperNative.getSegmentNoSpeechProb(p, i) > NO_SPEECH_MAX) {
+                noSpeechDropped++
+                continue
+            }
+
+            val key = text.lowercase().filter { it.isLetterOrDigit() || it.isWhitespace() }.trim()
+            val times = (seen[key] ?: 0) + 1
+            seen[key] = times
+            if (times > MAX_REPEATS) {
+                dropped++
+                continue
+            }
+
             // whisper timestamps are centiseconds
             segments += WhisperSegment(
                 startMs = WhisperNative.getTextSegmentT0(p, i) * 10,
@@ -97,6 +133,15 @@ class WhisperEngine {
                 text = text,
             )
         }
+
+        if (dropped > 0 || noSpeechDropped > 0) {
+            Log.i(
+                TAG,
+                "filtered $noSpeechDropped no-speech and $dropped repeated segments " +
+                    "of $count (kept ${segments.size})",
+            )
+        }
+
         val detected = WhisperNative.getDetectedLanguage(p).ifBlank { language }
         Result.success(TranscriptionResult(segments, detected, elapsed))
     }

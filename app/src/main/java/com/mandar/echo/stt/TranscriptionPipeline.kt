@@ -162,13 +162,41 @@ class TranscriptionPipeline(
                 return
             }
 
-            val result = engine.transcribe(samples, language).getOrThrow()
+            // Whisper only ever sees the voiced parts. Feeding it the silence in
+            // between is what produced pages of invented, looping text.
+            val voiced = VoiceActivityDetector.extractVoiced(samples)
+            if (voiced.isEmpty) {
+                Log.i(TAG, "chunk ${chunk.id} has no voiced regions after gating; skipping whisper")
+                db.transcriptDao().commitTranscript(
+                    chunkDao = chunkDao,
+                    segmentDao = db.segmentDao(),
+                    chunkId = chunk.id,
+                    segments = emptyList(),
+                    attempts = attempts,
+                    transcribeMs = 0,
+                    speechRatio = vad.speechRatio,
+                    wordCount = 0,
+                    status = ChunkStatus.SILENT,
+                )
+                if (!keepAudio) deleteAudio(chunk.id, file)
+                return
+            }
+            Log.i(
+                TAG,
+                "chunk ${chunk.id}: ${voiced.regions.size} voiced regions, " +
+                    "${"%.1f".format(voiced.samples.size / 16_000f)} s of " +
+                    "${"%.1f".format(samples.size / 16_000f)} s sent to whisper",
+            )
+
+            val result = engine.transcribe(voiced.samples, language).getOrThrow()
 
             val segments = result.segments.map {
+                // Timestamps come back relative to the compacted stream, so they
+                // have to be mapped through the gate before they mean anything.
                 SegmentEntity(
                     chunkId = chunk.id,
-                    startMs = chunk.startedAt + it.startMs,
-                    endMs = chunk.startedAt + it.endMs,
+                    startMs = chunk.startedAt + voiced.originalMs(it.startMs),
+                    endMs = chunk.startedAt + voiced.originalMs(it.endMs),
                     text = it.text,
                     language = result.language,
                 )

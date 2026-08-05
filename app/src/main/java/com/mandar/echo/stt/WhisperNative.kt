@@ -36,6 +36,13 @@ internal object WhisperNative {
     external fun getTextSegmentT0(contextPtr: Long, index: Int): Long
     external fun getTextSegmentT1(contextPtr: Long, index: Int): Long
 
+    /**
+     * 0..1 — whisper's own estimate that the segment contains no speech.
+     * High values on fluent-looking text are the signature of a hallucination
+     * over silence.
+     */
+    external fun getSegmentNoSpeechProb(contextPtr: Long, index: Int): Float
+
     external fun getDetectedLanguage(contextPtr: Long): String
     external fun getSystemInfo(): String
 }

@@ -97,6 +97,27 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
     params.suppress_blank   = true;
     params.no_timestamps    = false;
 
+    // Anti-hallucination. Ambient capture is the worst case for Whisper: it was
+    // trained on audio that always contains speech, so given room tone it invents
+    // fluent text and then loops on it ("the security is over" x7). These are the
+    // decoder's own defences, and they are set explicitly rather than left to the
+    // defaults so that changing them is a deliberate act.
+    //
+    //  - suppress_nst drops the non-speech token class (music/noise markers and
+    //    the subtitle-credit vocabulary Whisper reaches for over silence). It
+    //    defaults to FALSE upstream, which is wrong for this application.
+    //  - temperature_inc drives the fallback ladder: when a decode looks
+    //    degenerate by the two thresholds below, it is retried hotter instead of
+    //    being accepted.
+    //  - entropy_thold catches low-entropy output, which is exactly what a
+    //    repetition loop produces.
+    params.suppress_nst     = true;
+    params.temperature      = 0.0f;
+    params.temperature_inc  = 0.2f;
+    params.entropy_thold    = 2.4f;
+    params.logprob_thold    = -1.0f;
+    params.no_speech_thold  = 0.6f;
+
     params.progress_callback           = progress_cb;
     params.progress_callback_user_data = NULL;
     params.abort_callback              = abort_cb;
@@ -156,6 +177,18 @@ Java_com_mandar_echo_stt_WhisperNative_getTextSegmentT1(
         JNIEnv *env, jobject thiz, jlong context_ptr, jint index) {
     UNUSED(env); UNUSED(thiz);
     return whisper_full_get_segment_t1((struct whisper_context *) context_ptr, index);
+}
+
+// Whisper's own estimate that a segment contains no speech at all. The decoder
+// only uses this internally when the average log-probability is also poor, so a
+// confidently-worded hallucination over room tone still gets emitted. Exposing it
+// lets the caller drop those segments itself.
+JNIEXPORT jfloat JNICALL
+Java_com_mandar_echo_stt_WhisperNative_getSegmentNoSpeechProb(
+        JNIEnv *env, jobject thiz, jlong context_ptr, jint index) {
+    UNUSED(env); UNUSED(thiz);
+    if (context_ptr == 0) return 0.0f;
+    return whisper_full_get_segment_no_speech_prob((struct whisper_context *) context_ptr, index);
 }
 
 JNIEXPORT jstring JNICALL
