@@ -239,12 +239,31 @@ both APKs when it finishes, including after a failure, so the last test run left
 empty — no app, no downloaded model, no permission grants, no battery-optimisation exemption.
 Re-running `scripts\verify-on-device.ps1` restores all of it.
 
-**The 11 PM chain on Android 17.** Section 5 fired the whole chain successfully, but on API 36.
-The Pixel is API 37, and foreground-service promotion is the single most likely place for a
-next-OS regression — the `dataSync` path is what makes a summary-only wake-up legal when the
-microphone type would be refused from a background start. Firing
-`SummaryAlarmReceiver` with `am broadcast` and watching for
-`ForegroundServiceStartNotAllowedException` / `could not enter foreground` is the check.
+**The 11 PM chain on Android 17 — partially verified, and no longer manually testable.**
+
+What *is* confirmed on the Pixel (API 37):
+
+```
+tag=*walarm*:com.mandar.echo/.summary.SummaryAlarmReceiver
+type=RTC_WAKEUP origWhen=2026-08-05 23:00:00.000 window=0 exactAllowReason=policy_permission
+```
+
+`window=0` is a true exact alarm and `exactAllowReason=policy_permission` confirms
+`USE_EXACT_ALARM` was auto-granted. The app is also in standby bucket **5 (exempted)** and on
+the deviceidle whitelist, so neither App Standby nor Doze should defer it.
+
+What could **not** be re-tested: firing the receiver by hand. `SummaryAlarmReceiver` is
+`exported="false"`, and on API 37 an explicit `am broadcast` from the shell to a non-exported
+component is enqueued and then silently dropped — the receiver's first line never logs. This
+worked on the API 36 emulator (§5) and does not any more. It is a testing limitation rather
+than a defect: the real alarm is delivered by AlarmManager to the app's own PendingIntent,
+which is not subject to that check. The receiver was deliberately **not** exported to make it
+testable, because an exported receiver that triggers transcription and notification is a
+security hole in an app that records people.
+
+So the still-unverified part on API 37 is narrow but real: the `dataSync` foreground-service
+promotion used when the summary fires while **not** recording. Recording at the time makes the
+question moot, and it is the common case at 11 PM that it is not.
 
 **A real capture run on the phone.** Section 4's live run was on the emulator, against digital
 silence. Sample-exact rotation and post-transcript deletion are proven; hearing anything is not.
