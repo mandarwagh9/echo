@@ -14,14 +14,30 @@ internal object WhisperNative {
     external fun initContext(modelPath: String): Long
     external fun freeContext(contextPtr: Long)
 
-    /** Returns 0 on success. [language] is "auto", "en", "hi" or "mr". */
+    /**
+     * Returns 0 on success. [language] is "auto", "en", "hi" or "mr".
+     * [prompt] conditions the decoder — mainly to pin the output script.
+     */
     external fun fullTranscribe(
         contextPtr: Long,
         numThreads: Int,
         audioData: FloatArray,
         language: String,
         translate: Boolean,
+        prompt: String,
     ): Int
+
+    /**
+     * Probability of each of [codes] being the spoken language, scored over the
+     * first 30 s. Restricting the choice to the languages the app supports avoids
+     * whisper's own "auto" wandering into one of the other 96.
+     */
+    external fun detectLanguageProbs(
+        contextPtr: Long,
+        numThreads: Int,
+        audioData: FloatArray,
+        codes: Array<String>,
+    ): FloatArray
 
     /** 0..100, valid only while [fullTranscribe] is running. */
     external fun getProgress(): Int

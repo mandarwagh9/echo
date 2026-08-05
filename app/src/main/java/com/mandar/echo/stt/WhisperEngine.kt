@@ -40,6 +40,29 @@ class WhisperEngine {
 
         /** Occurrences of the same normalised text kept per chunk. */
         const val MAX_REPEATS = 2
+
+        /** The only languages this app claims to handle. */
+        val SUPPORTED = arrayOf("en", "hi", "mr")
+
+        /**
+         * A sentence of ordinary speech in each language, used as the decoder's
+         * initial prompt.
+         *
+         * Whisper conditions on this text, and the strongest thing it conditions
+         * is the output script. Without a prompt, Marathi audio comes back
+         * romanised, because Latin is the model's prior for a low-resource
+         * language; with one, it writes Devanagari. The content is deliberately
+         * mundane and domain-free so it biases script and register without
+         * putting specific words in the model's mouth.
+         */
+        val PROMPTS = mapOf(
+            "en" to "Okay, so I was thinking about the meeting tomorrow morning. " +
+                "Let me know what you think about it.",
+            "hi" to "हाँ, तो मैं कल की मीटिंग के बारे में सोच रहा था। " +
+                "आप बताइए कि आपको क्या लगता है।",
+            "mr" to "हो, मी उद्याच्या मीटिंगबद्दल विचार करत होतो. " +
+                "तुम्हाला काय वाटतं ते सांगा.",
+        )
     }
 
     private val mutex = Mutex()
@@ -87,9 +110,34 @@ class WhisperEngine {
             return@withLock Result.success(TranscriptionResult(emptyList(), language, 0))
         }
 
+        // Resolve "auto" ourselves, over three languages instead of whisper's 99.
+        val resolved = if (language == "auto") {
+            val probs = runCatching {
+                WhisperNative.detectLanguageProbs(p, threadCount, samples, SUPPORTED)
+            }.getOrNull()
+            val best = probs
+                ?.withIndex()
+                ?.maxByOrNull { it.value }
+                ?.takeIf { it.value > 0f }
+                ?.let { SUPPORTED[it.index] }
+            if (probs != null) {
+                Log.i(
+                    TAG,
+                    "language scores " + SUPPORTED.indices.joinToString(" ") {
+                        "${SUPPORTED[it]}=${"%.2f".format(probs.getOrElse(it) { 0f })}"
+                    } + " -> ${best ?: "en"}",
+                )
+            }
+            best ?: "en"
+        } else {
+            language
+        }
+
         val started = System.currentTimeMillis()
         val rc = try {
-            WhisperNative.fullTranscribe(p, threadCount, samples, language, false)
+            WhisperNative.fullTranscribe(
+                p, threadCount, samples, resolved, false, PROMPTS[resolved].orEmpty(),
+            )
         } catch (t: Throwable) {
             return@withLock Result.failure(t)
         }
@@ -142,7 +190,7 @@ class WhisperEngine {
             )
         }
 
-        val detected = WhisperNative.getDetectedLanguage(p).ifBlank { language }
+        val detected = WhisperNative.getDetectedLanguage(p).ifBlank { resolved }
         Result.success(TranscriptionResult(segments, detected, elapsed))
     }
 

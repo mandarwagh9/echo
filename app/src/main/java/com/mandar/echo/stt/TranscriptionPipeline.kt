@@ -2,6 +2,7 @@ package com.mandar.echo.stt
 
 import android.content.Context
 import android.util.Log
+import com.mandar.echo.audio.AudioGain
 import com.mandar.echo.audio.VoiceActivityDetector
 import com.mandar.echo.audio.WavWriter
 import com.mandar.echo.data.ChunkEntity
@@ -181,14 +182,16 @@ class TranscriptionPipeline(
                 if (!keepAudio) deleteAudio(chunk.id, file)
                 return
             }
+            val levelled = AudioGain.normalize(voiced.samples)
             Log.i(
                 TAG,
                 "chunk ${chunk.id}: ${voiced.regions.size} voiced regions, " +
                     "${"%.1f".format(voiced.samples.size / 16_000f)} s of " +
-                    "${"%.1f".format(samples.size / 16_000f)} s sent to whisper",
+                    "${"%.1f".format(samples.size / 16_000f)} s sent to whisper " +
+                    "(rms=${"%.4f".format(levelled.inputRms)}, gain=${"%.1f".format(levelled.gain)}x)",
             )
 
-            val result = engine.transcribe(voiced.samples, language).getOrThrow()
+            val result = engine.transcribe(levelled.samples, language).getOrThrow()
 
             val segments = result.segments.map {
                 // Timestamps come back relative to the compacted stream, so they

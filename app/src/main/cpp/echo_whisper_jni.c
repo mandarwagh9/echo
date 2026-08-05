@@ -67,10 +67,66 @@ Java_com_mandar_echo_stt_WhisperNative_freeContext(
     whisper_free((struct whisper_context *) context_ptr);
 }
 
+// Language detection restricted to the languages this app supports.
+//
+// whisper_full's own "auto" runs detection on the first 30 seconds and then
+// applies the winner to the entire call -- across 99 languages. On ambient audio
+// that regularly lands somewhere absurd (a Marathi speaker was decoded as
+// Russian, producing Cyrillic), and one bad guess corrupts a whole chunk. Since
+// the app only ever targets three languages, the right move is to score just
+// those three and pick the best. Returns one probability per requested code.
+JNIEXPORT jfloatArray JNICALL
+Java_com_mandar_echo_stt_WhisperNative_detectLanguageProbs(
+        JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads,
+        jfloatArray audio_data, jobjectArray codes) {
+    UNUSED(thiz);
+    struct whisper_context *context = (struct whisper_context *) context_ptr;
+    const jsize n_codes = (*env)->GetArrayLength(env, codes);
+    jfloatArray out = (*env)->NewFloatArray(env, n_codes);
+    if (context == NULL || out == NULL || n_codes == 0) return out;
+
+    jfloat *samples = (*env)->GetFloatArrayElements(env, audio_data, NULL);
+    jsize n_samples = (*env)->GetArrayLength(env, audio_data);
+
+    // Detection only ever reads the first window; feeding it more is wasted mel.
+    const jsize max_samples = WHISPER_SAMPLE_RATE * 30;
+    if (n_samples > max_samples) n_samples = max_samples;
+
+    jfloat *result = (jfloat *) calloc(n_codes, sizeof(jfloat));
+    if (result == NULL) {
+        (*env)->ReleaseFloatArrayElements(env, audio_data, samples, JNI_ABORT);
+        return out;
+    }
+
+    if (whisper_pcm_to_mel(context, samples, n_samples, num_threads) == 0) {
+        const int n_lang = whisper_lang_max_id() + 1;
+        float *probs = (float *) calloc(n_lang, sizeof(float));
+        if (probs != NULL) {
+            if (whisper_lang_auto_detect(context, 0, num_threads, probs) >= 0) {
+                for (jsize i = 0; i < n_codes; i++) {
+                    jstring code = (jstring) (*env)->GetObjectArrayElement(env, codes, i);
+                    const char *c = (*env)->GetStringUTFChars(env, code, NULL);
+                    const int id = whisper_lang_id(c);
+                    result[i] = (id >= 0 && id < n_lang) ? probs[id] : 0.0f;
+                    (*env)->ReleaseStringUTFChars(env, code, c);
+                    (*env)->DeleteLocalRef(env, code);
+                }
+            }
+            free(probs);
+        }
+    }
+
+    (*env)->SetFloatArrayRegion(env, out, 0, n_codes, result);
+    free(result);
+    (*env)->ReleaseFloatArrayElements(env, audio_data, samples, JNI_ABORT);
+    return out;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
         JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads,
-        jfloatArray audio_data, jstring language_str, jboolean translate) {
+        jfloatArray audio_data, jstring language_str, jboolean translate,
+        jstring prompt_str) {
     UNUSED(thiz);
     struct whisper_context *context = (struct whisper_context *) context_ptr;
     if (context == NULL) return -1;
@@ -118,6 +174,20 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
     params.logprob_thold    = -1.0f;
     params.no_speech_thold  = 0.6f;
 
+    // A short prompt in the target language. Whisper conditions on it, which
+    // pins the output script -- without it a Marathi utterance comes back
+    // romanised ("ka ni ka paiti na radu dhagda") because Latin is the model's
+    // prior. carry_initial_prompt keeps that conditioning on every window rather
+    // than letting it decay after the first.
+    const char *prompt = NULL;
+    if (prompt_str != NULL) {
+        prompt = (*env)->GetStringUTFChars(env, prompt_str, NULL);
+        if (prompt != NULL && prompt[0] != '\0') {
+            params.initial_prompt      = prompt;
+            params.carry_initial_prompt = true;
+        }
+    }
+
     params.progress_callback           = progress_cb;
     params.progress_callback_user_data = NULL;
     params.abort_callback              = abort_cb;
@@ -131,6 +201,7 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
         LOGE("whisper_full failed: %d", result);
     }
 
+    if (prompt != NULL) (*env)->ReleaseStringUTFChars(env, prompt_str, prompt);
     (*env)->ReleaseStringUTFChars(env, language_str, language);
     (*env)->ReleaseFloatArrayElements(env, audio_data, samples, JNI_ABORT);
     return result;
