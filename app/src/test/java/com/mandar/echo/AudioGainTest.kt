@@ -66,6 +66,25 @@ class AudioGainTest {
         assertEquals(1f, empty.gain, 1e-6f)
     }
 
+    /**
+     * The case that made the normaliser useless in production: quiet speech under
+     * one loud transient. Measured on a real chunk as rms=0.041 with gain=1.0x,
+     * because a single near-full-scale sample consumed all the headroom.
+     */
+    @Test
+    fun oneLoudTransientDoesNotBlockTheGain() {
+        val audio = tone(0.02f, n = 160_000)   // 10 s of quiet speech
+        audio[80_000] = 0.99f                  // a door slam
+        audio[80_001] = -0.99f
+
+        val r = AudioGain.normalize(audio)
+        assertTrue("a single transient still blocked the gain (${r.gain}x)", r.gain > 2f)
+        assertTrue("output escaped full scale", r.samples.all { it >= -1f && it <= 1f })
+
+        // The quiet part is what had to come up.
+        assertTrue("speech level barely moved: ${rms(r.samples)}", rms(r.samples) > 0.05f)
+    }
+
     @Test
     fun reportedRmsDescribesTheInputNotTheOutput() {
         val quiet = tone(0.01f)
