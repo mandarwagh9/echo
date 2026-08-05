@@ -24,9 +24,31 @@ enum class SttLanguage(val code: String, val label: String) {
     }
 }
 
+/**
+ * Where transcription happens.
+ *
+ * On-device Whisper is private and works with no network, and it is not good
+ * enough at Devanagari: measured against known references, Base recovers 0.23 of
+ * Hindi words and 0.00 of Marathi, Small 0.54 and 0.13. IndicConformer-600M --
+ * an AI4Bharat model built for Indian languages rather than one that tolerates
+ * them -- scores 1.00 on both, and beats Google's Chirp 2 on Marathi. It is far
+ * too large for a phone, so it runs on a server the user controls.
+ *
+ * The choice is a real trade, which is why it is a setting rather than a
+ * default: [CLOUD] sends audio off the device.
+ */
+enum class SttBackend(val label: String, val note: String) {
+    ON_DEVICE("On device", "Private, works offline. Weak on Hindi/Marathi"),
+    CLOUD("Your server", "Accurate on Hindi/Marathi. Audio leaves the phone"),
+}
+
 data class Settings(
     val recordingEnabled: Boolean = false,
     val modelFile: String = "ggml-base-q5_1.bin",
+    val sttBackend: SttBackend = SttBackend.ON_DEVICE,
+    /** Base URL of a vexyl-stt server, e.g. https://vexyl-stt-xxxx.run.app */
+    val sttServerUrl: String = "",
+    val sttApiKey: String = "",
     val language: SttLanguage = SttLanguage.AUTO,
     /** MediaRecorder.AudioSource. MIC is correct for far-field ambient capture. */
     val audioSource: Int = MediaRecorder.AudioSource.MIC,
@@ -50,12 +72,19 @@ class EchoSettings(private val context: Context) {
         val SKIP_SILENT = booleanPreferencesKey("skip_silent")
         val CHUNK_MIN = intPreferencesKey("chunk_minutes")
         val KEEP_AUDIO = booleanPreferencesKey("keep_audio")
+        val BACKEND = stringPreferencesKey("stt_backend")
+        val SERVER_URL = stringPreferencesKey("stt_server_url")
+        val API_KEY = stringPreferencesKey("stt_api_key")
     }
 
     val flow: Flow<Settings> = context.dataStore.data.map { p ->
         Settings(
             recordingEnabled = p[Keys.RECORDING] ?: false,
             modelFile = p[Keys.MODEL] ?: "ggml-base-q5_1.bin",
+            sttBackend = runCatching { SttBackend.valueOf(p[Keys.BACKEND] ?: "") }
+                .getOrDefault(SttBackend.ON_DEVICE),
+            sttServerUrl = (p[Keys.SERVER_URL] ?: "").trim().trimEnd('/'),
+            sttApiKey = p[Keys.API_KEY] ?: "",
             language = SttLanguage.fromCode(p[Keys.LANGUAGE] ?: "auto"),
             audioSource = p[Keys.SOURCE] ?: MediaRecorder.AudioSource.MIC,
             summaryHour = p[Keys.HOUR] ?: 23,
@@ -72,6 +101,13 @@ class EchoSettings(private val context: Context) {
         edit { it[Keys.RECORDING] = enabled }
 
     suspend fun setModel(file: String) = edit { it[Keys.MODEL] = file }
+
+    suspend fun setSttBackend(backend: SttBackend) = edit { it[Keys.BACKEND] = backend.name }
+
+    suspend fun setSttServer(url: String, apiKey: String) = edit {
+        it[Keys.SERVER_URL] = url.trim().trimEnd('/')
+        it[Keys.API_KEY] = apiKey.trim()
+    }
 
     suspend fun setLanguage(language: SttLanguage) = edit { it[Keys.LANGUAGE] = language.code }
 

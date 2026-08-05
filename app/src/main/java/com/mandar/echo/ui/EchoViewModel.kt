@@ -158,6 +158,14 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { echo.settings.setLanguage(language) }
     }
 
+    fun setSttBackend(backend: com.mandar.echo.data.SttBackend) {
+        viewModelScope.launch { echo.settings.setSttBackend(backend) }
+    }
+
+    fun setSttServer(url: String, apiKey: String) {
+        viewModelScope.launch { echo.settings.setSttServer(url, apiKey) }
+    }
+
     fun setAudioSource(source: Int) {
         viewModelScope.launch { echo.settings.setAudioSource(source) }
     }

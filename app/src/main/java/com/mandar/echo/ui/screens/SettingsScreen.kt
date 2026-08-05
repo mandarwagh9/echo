@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mandar.echo.BuildConfig
+import com.mandar.echo.data.SttBackend
 import com.mandar.echo.data.SttLanguage
 import com.mandar.echo.stt.DownloadState
 import com.mandar.echo.stt.WhisperModel
@@ -146,6 +147,49 @@ fun SettingsScreen(vm: EchoViewModel) {
                 "Download failed: ${it.message}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.foreground,
+            )
+        }
+
+        // ---- transcription backend -----------------------------------------
+
+        Group("Transcribed by")
+        Text(
+            "On-device Whisper is private and works offline, but it is weak on " +
+                "Devanagari — measured against known references it recovers about half " +
+                "of Hindi and almost none of Marathi. Your own IndicConformer server " +
+                "returns both word for word, at the cost of sending audio to it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.muted,
+        )
+        Spacer(Modifier.height(14.dp))
+        ChoiceRow(
+            options = SttBackend.entries.map { it.label },
+            selectedIndex = SttBackend.entries.indexOf(settings.sttBackend),
+            onSelect = { vm.setSttBackend(SttBackend.entries[it]) },
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            settings.sttBackend.note,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.muted,
+        )
+
+        if (settings.sttBackend == SttBackend.CLOUD) {
+            Spacer(Modifier.height(16.dp))
+            SettingRow(
+                "Server",
+                settings.sttServerUrl.ifBlank { "not set" },
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (settings.sttServerUrl.isBlank()) {
+                    "No server configured — Echo will keep using the on-device model."
+                } else {
+                    "Chunks are uploaded in 4-minute pieces. If the server cannot be " +
+                        "reached, Echo falls back to on-device rather than losing the audio."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.muted,
             )
         }
 

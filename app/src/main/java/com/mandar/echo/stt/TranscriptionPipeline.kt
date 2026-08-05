@@ -128,19 +128,54 @@ class TranscriptionPipeline(
 
         _state.value = _state.value.copy(busy = true, currentChunkId = chunk.id, progress = 0)
         try {
-            transcribeChunk(chunk, cfg.language.code, cfg.skipSilentChunks, cfg.keepAudioAfterTranscription)
+            transcribeChunk(chunk, cfg)
         } finally {
             _state.value = _state.value.copy(busy = false, currentChunkId = null, progress = 0)
         }
         return true
     }
 
+    /**
+     * Runs the configured backend, falling back to the on-device engine if the
+     * server is unreachable or errors.
+     *
+     * The fallback is the whole point of doing it here rather than swapping
+     * engines: a 24/7 recorder must keep working in a lift, on a plane, or when
+     * the server is cold. A worse transcript beats a lost one, and the chunk's
+     * audio is deleted either way once something is stored.
+     */
+    private suspend fun runBackend(
+        cfg: com.mandar.echo.data.Settings,
+        samples: FloatArray,
+        language: String,
+    ): TranscriptionResult {
+        if (cfg.sttBackend == com.mandar.echo.data.SttBackend.CLOUD) {
+            val cloud = CloudTranscriber(cfg.sttServerUrl, cfg.sttApiKey)
+            if (cloud.isConfigured) {
+                val result = cloud.transcribe(samples, language)
+                result.getOrNull()?.let { return it }
+                Log.w(
+                    TAG,
+                    "cloud transcription failed; falling back to on-device",
+                    result.exceptionOrNull(),
+                )
+                _state.value = _state.value.copy(
+                    lastError = "Server unreachable — used on-device",
+                )
+            } else {
+                Log.w(TAG, "cloud backend selected but no server URL set")
+            }
+        }
+        return engine.transcribe(samples, language).getOrThrow()
+    }
+
     private suspend fun transcribeChunk(
         chunk: ChunkEntity,
-        language: String,
-        skipSilent: Boolean,
-        keepAudio: Boolean,
+        cfg: com.mandar.echo.data.Settings,
     ) {
+        val language = cfg.language.code
+        val skipSilent = cfg.skipSilentChunks
+        val keepAudio = cfg.keepAudioAfterTranscription
         val chunkDao = db.chunkDao()
         val path = chunk.filePath
         val file = path?.let(::File)
@@ -206,7 +241,7 @@ class TranscriptionPipeline(
                     "(rms=${"%.4f".format(levelled.inputRms)}, gain=${"%.1f".format(levelled.gain)}x)",
             )
 
-            val result = engine.transcribe(levelled.samples, language).getOrThrow()
+            val result = runBackend(cfg, levelled.samples, language)
 
             val segments = result.segments.map {
                 // Timestamps come back relative to the compacted stream, so they
