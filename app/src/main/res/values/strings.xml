@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Echo</string>
+    <string name="notif_channel_recording">Recording</string>
+    <string name="notif_channel_recording_desc">Shown while Echo is listening.</string>
+    <string name="notif_channel_status">Status</string>
+    <string name="notif_channel_status_desc">Backlog, storage and resume alerts.</string>
+    <string name="notif_channel_summary">Daily summary</string>
+    <string name="notif_channel_summary_desc">Your 11 PM summary.</string>
+</resources>

@@ -1,0 +1,204 @@
+package com.mandar.echo.ui
+
+import android.app.Application
+import android.content.Context
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.mandar.echo.EchoApp
+import com.mandar.echo.audio.EchoServiceState
+import com.mandar.echo.audio.RecordingService
+import com.mandar.echo.data.ChunkEntity
+import com.mandar.echo.data.SegmentEntity
+import com.mandar.echo.data.Settings
+import com.mandar.echo.data.SttLanguage
+import com.mandar.echo.data.SummaryEntity
+import com.mandar.echo.stt.DownloadState
+import com.mandar.echo.stt.WhisperModel
+import com.mandar.echo.summary.SummaryScheduler
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.ZoneId
+
+private const val LEVEL_HISTORY = 64
+
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
+class EchoViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val echo = application as EchoApp
+    private val zone: ZoneId get() = ZoneId.systemDefault()
+
+    val settings: StateFlow<Settings> = echo.settings.flow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
+    val recording = EchoServiceState.recording
+    val pausedReason = EchoServiceState.pausedReason
+    val droppedSamples = EchoServiceState.droppedSamples
+    val sessionStartedAt = EchoServiceState.sessionStartedAt
+    val currentChunkStartedAt = EchoServiceState.currentChunkStartedAt
+    val freeBytes = EchoServiceState.freeBytes
+
+    val pipelineState = echo.pipeline.state
+    val downloadState: StateFlow<DownloadState> = echo.models.state
+
+    val pendingCount: StateFlow<Int> = echo.db.chunkDao().pendingCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val failedChunks: StateFlow<List<ChunkEntity>> = echo.db.chunkDao().failedChunks()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _levels = MutableStateFlow<List<Float>>(emptyList())
+    val levels: StateFlow<List<Float>> = _levels
+
+    private val _selectedDate = MutableStateFlow(LocalDate.now())
+    val selectedDate: StateFlow<LocalDate> = _selectedDate
+
+    val segmentsForDay: StateFlow<List<SegmentEntity>> = _selectedDate
+        .flatMapLatest { date ->
+            val (from, to) = date.bounds()
+            echo.db.segmentDao().betweenFlow(from, to)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val chunksForDay: StateFlow<List<ChunkEntity>> = _selectedDate
+        .flatMapLatest { date ->
+            val (from, to) = date.bounds()
+            echo.db.chunkDao().chunksBetweenFlow(from, to)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val summaryForDay: StateFlow<SummaryEntity?> = _selectedDate
+        .flatMapLatest { echo.db.summaryDao().forDayFlow(it.toEpochDay()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val summaries: StateFlow<List<SummaryEntity>> = echo.db.summaryDao().recent()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _query = MutableStateFlow("")
+    val query: StateFlow<String> = _query
+
+    val searchResults: StateFlow<List<SegmentEntity>> = _query
+        .debounce(220)
+        .flatMapLatest { q ->
+            if (q.isBlank()) flowOf(emptyList()) else echo.db.segmentDao().search(q.trim())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    init {
+        // Seed the storage figure immediately. It is otherwise only written by the
+        // recording service's monitor loop, so Settings would report "0 B" free —
+        // which reads as "disk full" — until recording had run at least once.
+        EchoServiceState.setFreeBytes(currentFreeBytes())
+
+        viewModelScope.launch {
+            EchoServiceState.level.collect { value ->
+                _levels.value = (_levels.value + value).takeLast(LEVEL_HISTORY)
+            }
+        }
+    }
+
+    private fun currentFreeBytes(): Long = runCatching {
+        android.os.StatFs(getApplication<Application>().filesDir.absolutePath).availableBytes
+    }.getOrDefault(0L)
+
+    private fun LocalDate.bounds(): Pair<Long, Long> {
+        val from = atStartOfDay(zone).toInstant().toEpochMilli()
+        val to = plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
+        return from to to
+    }
+
+    // ---- actions ----------------------------------------------------------
+
+    fun selectDate(date: LocalDate) { _selectedDate.value = date }
+
+    fun setQuery(value: String) { _query.value = value }
+
+    fun toggleRecording(context: Context) {
+        viewModelScope.launch {
+            val enabled = !settings.value.recordingEnabled
+            echo.settings.setRecordingEnabled(enabled)
+            if (enabled) RecordingService.start(context) else RecordingService.stop(context)
+        }
+    }
+
+    fun startRecording(context: Context) {
+        viewModelScope.launch {
+            echo.settings.setRecordingEnabled(true)
+            RecordingService.start(context)
+        }
+    }
+
+    fun modelsInstalled(): List<WhisperModel> = echo.models.installed()
+
+    fun isInstalled(model: WhisperModel) = echo.models.isInstalled(model)
+
+    fun downloadModel(model: WhisperModel) {
+        viewModelScope.launch { echo.models.download(model) }
+    }
+
+    fun cancelDownload() = echo.models.cancel()
+
+    fun deleteModel(model: WhisperModel) {
+        viewModelScope.launch { echo.models.delete(model) }
+    }
+
+    fun setModel(model: WhisperModel) {
+        viewModelScope.launch { echo.settings.setModel(model.fileName) }
+    }
+
+    fun setLanguage(language: SttLanguage) {
+        viewModelScope.launch { echo.settings.setLanguage(language) }
+    }
+
+    fun setAudioSource(source: Int) {
+        viewModelScope.launch { echo.settings.setAudioSource(source) }
+    }
+
+    fun setChunkMinutes(minutes: Int) {
+        viewModelScope.launch { echo.settings.setChunkMinutes(minutes) }
+    }
+
+    fun setSkipSilent(skip: Boolean) {
+        viewModelScope.launch { echo.settings.setSkipSilent(skip) }
+    }
+
+    fun setKeepAudio(keep: Boolean) {
+        viewModelScope.launch { echo.settings.setKeepAudio(keep) }
+    }
+
+    fun setSummaryTime(context: Context, hour: Int, minute: Int) {
+        viewModelScope.launch {
+            echo.settings.setSummaryTime(hour, minute)
+            SummaryScheduler.scheduleNext(context, echo.settings.current())
+        }
+    }
+
+    /** Builds the summary for the selected day immediately, without waiting for 11 PM. */
+    fun generateSummaryNow() {
+        viewModelScope.launch { echo.summaryEngine.generate(_selectedDate.value) }
+    }
+
+    fun retryFailedChunks() {
+        viewModelScope.launch { echo.db.chunkDao().retryAllFailed() }
+    }
+
+    fun whisperSystemInfo(): String = echo.whisper.systemInfo()
+
+    fun deleteEverything(context: Context) {
+        viewModelScope.launch {
+            echo.settings.setRecordingEnabled(false)
+            RecordingService.stop(context)
+            echo.db.chunkDao().deleteAll()
+            echo.db.summaryDao().deleteAll()
+            java.io.File(context.filesDir, "chunks").listFiles()?.forEach { it.delete() }
+        }
+    }
+}
