@@ -201,6 +201,37 @@ figure — Tiny, not Base — never meant anything.
 
 ---
 
+## 7. Which model? Measured, not assumed
+
+`ModelComparisonInstrumentedTest` runs the same four fixtures through each installed model and
+reports word recall against a known reference. Fixtures are 16 kHz clips synthesised by Google
+Cloud TTS, committed to `androidTest/assets`, so the numbers are reproducible.
+
+| model | Hindi | Marathi | code-switched | English | realtime (emulator) |
+|---|---|---|---|---|---|
+| Base | 0.23 | 0.00 | 0.08 | 1.00 | 0.15× |
+| **Small** | **0.54** | **0.13** | **0.38** | 1.00 | 0.06× |
+
+Small more than doubles Hindi recall and is roughly five times better on code-switched speech,
+for about 2.5× the compute. Both are perfect on English, so the English fixture proves only that
+nothing regressed.
+
+**The recall figures understate Small.** Its code-switched output was
+
+> कल का सेंसर कलबरेशिन अभी पेंटिंग है, मैं एवनिंग दक अबड़ेट बहेज दुंगा
+
+against a reference of "कल का sensor calibration अभी pending है, मैं evening तक update भेज दूंगा।"
+That is very nearly the sentence — but whisper transliterates the English words into Devanagari
+while the reference keeps them in Latin, so exact word matching scores them as misses. Read the
+transcripts in the log, not just the number.
+
+The realtime column is from an x86_64 emulator without AVX2 and is meaningful only as a *ratio*
+between the two models. On the Pixel 9, Base measured 5.29× on clean English and 0.4× on
+far-field Marathi before the ladder was capped — the spread between those two, on one model, is
+larger than the spread between models.
+
+---
+
 ## Not yet verified
 
 **The app is not currently installed on the phone.** Gradle's `connectedAndroidTest` uninstalls

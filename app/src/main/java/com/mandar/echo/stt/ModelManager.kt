@@ -25,9 +25,9 @@ enum class WhisperModel(
     val bytes: Long,
     val note: String,
 ) {
-    TINY("ggml-tiny-q5_1.bin", "Tiny", 32_152_673L, "Fastest, weakest on Hindi/Marathi"),
-    BASE("ggml-base-q5_1.bin", "Base", 59_707_000L, "Recommended balance"),
-    SMALL("ggml-small-q5_1.bin", "Small", 190_100_000L, "Best quality, much slower");
+    TINY("ggml-tiny-q5_1.bin", "Tiny", 32_152_673L, "Fastest. English only, in practice"),
+    BASE("ggml-base-q5_1.bin", "Base", 59_707_000L, "Fast. Recovers ~1 word in 4 of Hindi"),
+    SMALL("ggml-small-q5_1.bin", "Small", 190_100_000L, "2x Base on Hindi. ~2.5x slower");
 
     val url: String get() = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$fileName"
 
