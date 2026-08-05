@@ -25,6 +25,8 @@ internal object WhisperNative {
         language: String,
         translate: Boolean,
         prompt: String,
+        /** Silero VAD model, or "" to fall back to the caller's own gate. */
+        vadModelPath: String,
     ): Int
 
     /**

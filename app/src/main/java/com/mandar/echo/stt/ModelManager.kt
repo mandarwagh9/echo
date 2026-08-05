@@ -36,6 +36,21 @@ enum class WhisperModel(
     }
 }
 
+/**
+ * Silero VAD, as shipped by whisper.cpp.
+ *
+ * Echo's own gate is an energy threshold, which cannot tell speech from a noisy
+ * room: on a real chunk it passed 527.9 s of 600 s, so whisper spent most of its
+ * time decoding traffic and clatter and looping on it. Silero is a small neural
+ * classifier that actually distinguishes voice, and at 885 KB it is free next to
+ * a 190 MB speech model.
+ */
+object VadModel {
+    const val FILE_NAME = "ggml-silero-v5.1.2.bin"
+    const val BYTES = 885_098L
+    const val URL = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/$FILE_NAME"
+}
+
 sealed interface DownloadState {
     data object Idle : DownloadState
     data class Running(val model: WhisperModel, val bytes: Long, val total: Long) : DownloadState {
@@ -76,6 +91,51 @@ class ModelManager(context: Context) {
     }
 
     fun delete(model: WhisperModel): Boolean = fileFor(model).delete()
+
+    fun vadFile(): File = File(dir, VadModel.FILE_NAME)
+
+    fun isVadInstalled(): Boolean =
+        vadFile().let { it.exists() && it.length() > VadModel.BYTES * 0.9 }
+
+    /**
+     * Fetches the VAD model if missing. Failure is not fatal and is not surfaced:
+     * without it the pipeline falls back to the energy gate, which is worse but
+     * works, and a speech recorder should not stop recording because an optional
+     * 885 KB download failed.
+     */
+    suspend fun ensureVad(): File? = withContext(Dispatchers.IO) {
+        val target = vadFile()
+        if (isVadInstalled()) return@withContext target
+
+        val part = File(dir, "${VadModel.FILE_NAME}.part")
+        try {
+            val conn = (URL(VadModel.URL).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 30_000
+                readTimeout = 60_000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "Echo/1.0")
+            }
+            conn.connect()
+            if (conn.responseCode !in 200..299) {
+                throw IllegalStateException("HTTP ${conn.responseCode} fetching VAD model")
+            }
+            part.delete()
+            conn.inputStream.use { input ->
+                part.outputStream().buffered(1 shl 16).use { input.copyTo(it) }
+            }
+            if (part.length() < VadModel.BYTES * 0.9) {
+                throw IllegalStateException("truncated VAD download (${part.length()})")
+            }
+            target.delete()
+            if (!part.renameTo(target)) throw IllegalStateException("could not finalise VAD model")
+            Log.i(TAG, "installed ${VadModel.FILE_NAME} (${target.length()} bytes)")
+            target
+        } catch (t: Throwable) {
+            part.delete()
+            Log.w(TAG, "VAD model unavailable; falling back to the energy gate", t)
+            null
+        }
+    }
 
     fun cancel() { cancelRequested = true }
 

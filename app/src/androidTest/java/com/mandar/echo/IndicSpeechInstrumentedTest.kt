@@ -55,7 +55,14 @@ class IndicSpeechInstrumentedTest {
         if (!models.isInstalled(WhisperModel.BASE)) {
             models.download(WhisperModel.BASE).getOrThrow()
         }
-        WhisperEngine().also { it.load(models.fileFor(WhisperModel.BASE)).getOrThrow() }
+        WhisperEngine().also { e ->
+            e.load(models.fileFor(WhisperModel.BASE)).getOrThrow()
+            // Exercise the configuration that actually ships. Silero trims the
+            // audio whisper sees, so a mistake here shows up as missing words
+            // rather than an error, which is exactly why it must be in the test.
+            models.ensureVad()?.let { e.vadModelPath = it.absolutePath }
+            android.util.Log.i("EchoTest", "VAD model: '${e.vadModelPath}'")
+        }
     }
 
     private fun devanagariRatio(s: String): Float {

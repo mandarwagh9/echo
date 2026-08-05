@@ -126,7 +126,7 @@ JNIEXPORT jint JNICALL
 Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
         JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads,
         jfloatArray audio_data, jstring language_str, jboolean translate,
-        jstring prompt_str) {
+        jstring prompt_str, jstring vad_model_path_str) {
     UNUSED(thiz);
     struct whisper_context *context = (struct whisper_context *) context_ptr;
     if (context == NULL) return -1;
@@ -202,6 +202,31 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
         }
     }
 
+    // Silero VAD, if the model is installed.
+    //
+    // Echo already gates on energy before calling here, but energy cannot
+    // separate speech from a busy room: a real chunk passed 527.9 s of its 600 s,
+    // and whisper spent most of that decoding clatter and looping on it. Silero
+    // is a neural classifier that actually recognises voice. Its timestamps are
+    // reported against the audio handed to whisper_full, which is the caller's
+    // already-gated stream, so the caller's own mapping back to wall-clock still
+    // composes correctly.
+    const char *vad_path = NULL;
+    if (vad_model_path_str != NULL) {
+        vad_path = (*env)->GetStringUTFChars(env, vad_model_path_str, NULL);
+        if (vad_path != NULL && vad_path[0] != '\0') {
+            params.vad           = true;
+            params.vad_model_path = vad_path;
+            params.vad_params    = whisper_vad_default_params();
+            // A little stricter than default, and generous with padding: cutting a
+            // word costs more than passing a second of silence.
+            params.vad_params.threshold               = 0.55f;
+            params.vad_params.min_speech_duration_ms  = 250;
+            params.vad_params.min_silence_duration_ms = 400;
+            params.vad_params.speech_pad_ms           = 300;
+        }
+    }
+
     params.progress_callback           = progress_cb;
     params.progress_callback_user_data = NULL;
     params.abort_callback              = abort_cb;
@@ -215,6 +240,7 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
         LOGE("whisper_full failed: %d", result);
     }
 
+    if (vad_path != NULL) (*env)->ReleaseStringUTFChars(env, vad_model_path_str, vad_path);
     if (prompt != NULL) (*env)->ReleaseStringUTFChars(env, prompt_str, prompt);
     (*env)->ReleaseStringUTFChars(env, language_str, language);
     (*env)->ReleaseFloatArrayElements(env, audio_data, samples, JNI_ABORT);

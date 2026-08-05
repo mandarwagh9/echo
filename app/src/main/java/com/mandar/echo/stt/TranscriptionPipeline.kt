@@ -108,6 +108,15 @@ class TranscriptionPipeline(
         }
         _state.value = _state.value.copy(modelReady = true)
 
+        // Optional and best-effort: 885 KB, fetched once. If it is not there the
+        // engine falls back to the energy gate rather than refusing to transcribe.
+        if (engine.vadModelPath.isEmpty()) {
+            models.ensureVad()?.let {
+                engine.vadModelPath = it.absolutePath
+                Log.i(TAG, "Silero VAD enabled")
+            }
+        }
+
         if (chunkDao.claimOldestPending() == 0) return false
         val chunk = chunkDao.currentlyTranscribing() ?: return false
 

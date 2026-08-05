@@ -100,6 +100,9 @@ class WhisperEngine {
      * @param samples 16 kHz mono, normalised to -1..1
      * @param language "auto", "en", "hi" or "mr"
      */
+    /** Set once the Silero VAD model is on disk; empty means fall back to the energy gate. */
+    @Volatile var vadModelPath: String = ""
+
     suspend fun transcribe(
         samples: FloatArray,
         language: String,
@@ -137,6 +140,7 @@ class WhisperEngine {
         val rc = try {
             WhisperNative.fullTranscribe(
                 p, threadCount, samples, resolved, false, PROMPTS[resolved].orEmpty(),
+                vadModelPath,
             )
         } catch (t: Throwable) {
             return@withLock Result.failure(t)
