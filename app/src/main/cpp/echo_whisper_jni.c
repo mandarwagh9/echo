@@ -169,10 +169,24 @@ Java_com_mandar_echo_stt_WhisperNative_fullTranscribe(
     //    repetition loop produces.
     params.suppress_nst     = true;
     params.temperature      = 0.0f;
-    params.temperature_inc  = 0.2f;
     params.entropy_thold    = 2.4f;
     params.logprob_thold    = -1.0f;
     params.no_speech_thold  = 0.6f;
+
+    // 0.4, not the 0.2 upstream default. The ladder retries a window at ever
+    // higher temperature until the decode stops looking degenerate, so the step
+    // size sets the worst case: 0.2 allows six attempts, 0.4 allows three.
+    //
+    // That worst case is not hypothetical here. On clean English almost no window
+    // needs a retry and Base runs at 5.3x realtime; on noisy far-field Marathi
+    // nearly every window fails the entropy check, and measured throughput on a
+    // real chunk collapsed to 0.4x -- slower than the audio arrives, which for a
+    // 24/7 recorder is a queue that never drains.
+    //
+    // Halving the ladder is affordable because it is no longer the only defence
+    // against repetition: WhisperEngine drops repeated segments per chunk, and
+    // TextTools.dropRepeats collapses them again when the day is summarised.
+    params.temperature_inc  = 0.4f;
 
     // A short prompt in the target language. Whisper conditions on it, which
     // pins the output script -- without it a Marathi utterance comes back

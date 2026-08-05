@@ -1,6 +1,7 @@
 package com.mandar.echo
 
 import com.mandar.echo.audio.VoiceActivityDetector
+// (repetition-collapse tests live in SummaryTest, next to the rest of TextTools)
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

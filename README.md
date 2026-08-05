@@ -120,12 +120,15 @@ Anything else would fail silently.
   Hindi and Marathi names entirely. The UI labels it approximate rather than pretending.
 - **OEM battery managers** (Xiaomi, Samsung, OnePlus) may kill long-running services. Mark
   Echo as unrestricted in battery settings.
-- **Small model quality.** `Base` on accented or noisy far-field Marathi is imperfect. `Small`
-  is better but may not sustain faster-than-realtime transcription on mid-range hardware.
-- **Hindi and Marathi are not yet measured end-to-end.** Every transcription that has actually
-  been verified used English audio; the Devanagari tests check the tokeniser, not the
-  recogniser. Tests that close this gap are written but have not completed a run — see
-  [Not yet verified](docs/VERIFICATION.md#not-yet-verified).
+- **Base is weak on Devanagari.** This is the honest headline limitation. On clean, studio-clean
+  Hindi it returns correct script and roughly the right words; on far-field Marathi in a noisy
+  room it returns correct script and approximately the right *sounds*. `Small` is meaningfully
+  better and roughly three times the compute — see
+  [docs/VERIFICATION.md](docs/VERIFICATION.md) for the measured comparison.
+- **Throughput is the binding constraint, not accuracy.** Base runs at 5.3× realtime on clean
+  English and collapses on hard audio, because the temperature-fallback ladder retries every
+  window that looks degenerate. A 24/7 recorder that transcribes slower than it records has a
+  queue that never drains, so the ladder is deliberately capped.
 
 ## Privacy and legal
 

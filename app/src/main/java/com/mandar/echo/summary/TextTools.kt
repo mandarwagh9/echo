@@ -19,6 +19,37 @@ object TextTools {
     private val TOKEN = Regex("[\\p{L}\\p{M}\\p{N}']+")
     private val SENTENCE_SPLIT = Regex("(?<=[.!?।])\\s+|\\n+")
 
+    /**
+     * Collapses a runaway speech recogniser before it reaches the summariser.
+     *
+     * When whisper's decoder gets stuck it emits one phrase hundreds of times.
+     * [com.mandar.echo.stt.WhisperEngine] filters that per chunk, but a summary
+     * spans a whole day and a transcript already in the database cannot be
+     * re-decoded. Left alone, a single loop wins every topic, every key sentence
+     * and the entire word count -- one bad ten-minute chunk is enough to make the
+     * day's summary meaningless.
+     *
+     * Also drops entries with no letters or digits at all, which is what a
+     * hallucination over silence usually degrades to ("." on its own).
+     */
+    fun <T> dropRepeats(items: List<T>, maxRepeats: Int = 2, key: (T) -> String): List<T> {
+        val seen = HashMap<String, Int>()
+        val out = ArrayList<T>(items.size)
+        for (item in items) {
+            val text = key(item)
+            if (!TOKEN.containsMatchIn(text)) continue
+            val k = repeatKey(text)
+            val n = (seen[k] ?: 0) + 1
+            seen[k] = n
+            if (n <= maxRepeats) out += item
+        }
+        return out
+    }
+
+    /** Case- and punctuation-insensitive identity, so "Yes." and "yes" collide. */
+    fun repeatKey(text: String): String =
+        TOKEN.findAll(text.lowercase()).joinToString(" ") { it.value }
+
     /** Devanagari block, covering both Hindi and Marathi. */
     private val DEVANAGARI = 'ऀ'..'ॿ'
 

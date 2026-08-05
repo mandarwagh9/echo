@@ -119,6 +119,56 @@ class TextToolsTest {
         assertTrue(TextTools.keySentences(emptyList()).isEmpty())
         assertTrue(TextTools.candidateNames(emptyList()).isEmpty())
     }
+
+    // ---- repetition collapse ------------------------------------------------
+    //
+    // A stuck decoder emitted "the security is over" seven times in a row on the
+    // real device, and 150 of one chunk's 168 segments were repeats. Without this
+    // filter the loop wins every topic and the whole word count.
+
+    @Test
+    fun `a runaway loop is collapsed to a couple of mentions`() {
+        val loop = List(200) { "the security is over" }
+        val kept = TextTools.dropRepeats(loop) { it }
+        assertEquals(2, kept.size)
+    }
+
+    @Test
+    fun `genuine repetition of a short phrase is still allowed twice`() {
+        val day = listOf("okay", "let us start the meeting", "okay", "okay", "okay")
+        val kept = TextTools.dropRepeats(day) { it }
+        assertEquals(listOf("okay", "let us start the meeting", "okay"), kept)
+    }
+
+    @Test
+    fun `collapse ignores case and punctuation`() {
+        val kept = TextTools.dropRepeats(listOf("Yes.", "yes", "YES!", "yes,")) { it }
+        assertEquals(2, kept.size)
+    }
+
+    @Test
+    fun `segments with no words at all are dropped`() {
+        // What a hallucination over silence decays to.
+        val kept = TextTools.dropRepeats(listOf(".", " ", "...", "real words here")) { it }
+        assertEquals(listOf("real words here"), kept)
+    }
+
+    @Test
+    fun `Devanagari repeats collapse too`() {
+        val kept = TextTools.dropRepeats(List(50) { "ठीक आहे" } + "उद्या सकाळी भेटू") { it }
+        assertEquals(3, kept.size)
+        assertTrue(kept.contains("उद्या सकाळी भेटू"))
+    }
+
+    @Test
+    fun `distinct speech is left completely alone`() {
+        val day = listOf(
+            "morning standup with Rohit",
+            "the sensor calibration is drifting",
+            "we should rerun it before the flight test",
+        )
+        assertEquals(day, TextTools.dropRepeats(day) { it })
+    }
 }
 
 class SummarySchedulerTest {

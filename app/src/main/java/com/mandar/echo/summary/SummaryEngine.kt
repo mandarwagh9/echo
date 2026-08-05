@@ -65,7 +65,20 @@ class SummaryEngine(
         val to = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
 
         val chunks = db.chunkDao().chunksBetween(from, to)
-        val segments = db.segmentDao().between(from, to)
+        val allSegments = db.segmentDao().between(from, to)
+
+        // A stuck decoder can put hundreds of copies of one phrase into a single
+        // day. Counting them would hand the summary to the loop, so they are
+        // collapsed here as well as at transcription time -- transcripts already
+        // in the database cannot be re-decoded.
+        val segments = TextTools.dropRepeats(allSegments) { it.text }
+        if (segments.size < allSegments.size) {
+            Log.i(
+                TAG,
+                "dropped ${allSegments.size - segments.size} repeated segments of " +
+                    "${allSegments.size} before summarising $date",
+            )
+        }
 
         if (chunks.isEmpty()) {
             Log.i(TAG, "no chunks for $date; skipping summary")
