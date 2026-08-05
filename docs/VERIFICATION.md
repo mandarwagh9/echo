@@ -232,6 +232,31 @@ larger than the spread between models.
 
 ---
 
+## 8. Level normalisation, measured on the phone
+
+The clearest single result of the whole exercise. Two chunks of the same user's far-field
+speech, same device, same model (Small), same build except for how headroom is measured:
+
+| | `gain=1.0x` (true peak) | `gain=3.4x` (99.5th percentile) |
+|---|---|---|
+| raw segments from the decoder | 421 | **118** |
+| of those, repeats | 400 (95%) | **82 (69%)** |
+| segments kept | 21 | **36** |
+| words | 68 | **445** |
+| realtime factor | 0.9× | 0.5× |
+
+Both chunks measured `rms ≈ 0.024`, a quarter of the level whisper expects. In the first, a
+single loud transient had already reached full scale, so the true-peak calculation permitted no
+gain at all and the decoder worked on audio far below its training distribution — where it
+falls back on its priors and loops. Measuring headroom at the 99.5th percentile instead cut the
+decoder's discarded output by **72%** and produced **6.5× more transcript**.
+
+The realtime factor moved the wrong way for the right reason: at 68 words the model was
+mostly looping and bailing, at 445 words it is actually decoding speech. Throughput bought
+quality here, and that is the correct trade — but see below, because 0.5× is not sustainable.
+
+---
+
 ## Not yet verified
 
 **The app is not currently installed on the phone.** Gradle's `connectedAndroidTest` uninstalls
@@ -278,9 +303,24 @@ written and compile; **neither has completed a run**, because the phone dropped 
 partway through. Until they pass, "multilingual Hindi/Marathi STT" rests on the model card, not
 on a measurement.
 
-**Real far-field human speech.** Even once those pass, TTS is clean, close-miked, studio-grade
-audio. It cannot tell you how the model handles an accented speaker across a room with a fan
-running. The only test for that is using it.
+**Whether Small can keep up in a noisy room — it currently cannot.** Measured at 0.5× realtime
+on a chunk that was 88% voiced (527.9 s of 600 s). Over a waking day that backlog never clears.
+Two things make this less alarming than it sounds and one makes it worse:
+
+- 88% voiced is an unusually live environment. A quiet evening gates down to a fraction of that
+  and Small keeps up comfortably — the binding number is *voiced seconds per day*, not chunk
+  duration.
+- Audio is retained until transcribed, so a backlog is lag rather than loss, and it drains
+  whenever the room goes quiet.
+- But an 88%-voiced chunk suggests the VAD gate is too permissive, not that the room is that
+  busy. Tightening it would cut compute *and* quality-harming noise at once, and is the single
+  highest-value change left. Base at roughly 2.5× Small's speed is the fallback that keeps up
+  today, at about half the Hindi accuracy.
+
+**Real far-field human speech, scored.** The 445-word chunk above has not been checked against
+what was actually said. TTS fixtures are clean, close-miked and studio-grade; they cannot tell
+you how the model handles an accented speaker across a room with a fan running. The only test
+for that is a human reading a transcript of their own day.
 
 **Reboot resume, mic preemption by an incoming call, and OEM battery-killer behaviour** are
 implemented and reasoned about, but need a handset living a normal day to be proven.
