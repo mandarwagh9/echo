@@ -6,9 +6,17 @@
 # By default this only installs, grants permissions and launches.
 #
 # -RunTests additionally runs the instrumented suite. That is DESTRUCTIVE: the
-# summary tests call deleteAll() on the real app database, and Gradle uninstalls
-# the app afterwards. Only pass it on a device whose recordings you are willing to
-# lose -- never on a phone that has been collecting your day.
+# summary and acoustic tests call deleteAll() on the real app database, and Gradle
+# uninstalls the app afterwards -- which also wipes the downloaded speech model and
+# drops the permission grants and battery exemption this script sets up. Only pass
+# it on a device whose recordings you are willing to lose -- never on a phone that
+# has been collecting your day. Always re-run this script afterwards to restore the
+# install.
+#
+# NOTE: -RunTests currently fails the build. Four tests (IndicSpeechInstrumentedTest
+# and AcousticCaptureInstrumentedTest) are written but have never completed a run.
+# To run only the known-good set, append:
+#   -Pandroid.testInstrumentationRunnerArguments.class=com.mandar.echo.WhisperPipelineInstrumentedTest,com.mandar.echo.SummaryEngineInstrumentedTest
 
 param(
     [switch]$RunTests
@@ -61,13 +69,19 @@ if ($RunTests) {
     Push-Location $root
     try {
         & "$root\gradlew.bat" :app:connectedReleaseAndroidTest --no-daemon
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Instrumented tests FAILED." -ForegroundColor Red
-            Write-Host "Report: app\build\reports\androidTests\connected\release\index.html"
-            exit 1
-        }
+        $testsFailed = $LASTEXITCODE -ne 0
     } finally { Pop-Location }
-    Write-Host "All instrumented tests passed." -ForegroundColor Green
+
+    if ($testsFailed) {
+        # Deliberately not exiting here. Gradle uninstalls both APKs when it
+        # finishes, failure included, so bailing out now would leave the phone with
+        # no app at all -- the worst possible end state for a debugging session.
+        Write-Host "Instrumented tests FAILED." -ForegroundColor Red
+        Write-Host "Report: app\build\reports\androidTests\connected\release\index.html"
+        Write-Host "Reinstalling anyway so the phone is not left empty." -ForegroundColor Yellow
+    } else {
+        Write-Host "All instrumented tests passed." -ForegroundColor Green
+    }
 } else {
     Section "Skipping instrumented tests"
     Write-Host "Pass -RunTests to run them. They erase on-device recordings, so they" -ForegroundColor DarkGray
@@ -106,3 +120,6 @@ On the phone:
 Watch it work:
   $adb logcat -s RecordingService AudioChunker TranscriptionPipeline EchoWhisper SummaryScheduler
 "@ -ForegroundColor Green
+
+# The install succeeded either way; the exit code still has to report the tests.
+if ($testsFailed) { exit 1 }

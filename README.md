@@ -68,10 +68,11 @@ length → 1 minute**.
 
 ## Status
 
-Working prototype, verified on a **Pixel 9 running Android 17** and on an Android 16 emulator:
-42 JVM unit tests and 11 on-device instrumented tests passing on the phone, a live recording
+Working prototype. **On a Pixel 9 (Android 17):** 42 JVM unit tests and 11 instrumented tests
+passing, plus the throughput measurement below. **On an Android 16 emulator:** a live recording
 run confirming sample-exact chunking and audio deletion, and the 11 PM summary chain fired end
-to end. Full record, including the eleven bugs the process surfaced, is in
+to end — neither of which has been repeated on the phone yet. Full record, including the eleven
+bugs the process surfaced and an explicit list of what remains unverified, is in
 [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 **Throughput on the Pixel 9: 5.3× realtime** with the shipping **Base** model on 4 threads —

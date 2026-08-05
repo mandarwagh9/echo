@@ -34,17 +34,30 @@ Android 16 (API 36) x86_64 emulator, used while the phone was unreachable over A
 - **`SummarySchedulerTest`** — next-11-PM arithmetic before, after and exactly at the target.
 - **`SummaryFormatTest`** — duration, language-name and percentage rendering.
 
-## 3. Instrumented tests — 11 passing on the Pixel 9
+## 3. Instrumented tests — 11 of 16 passing on the Pixel 9
 
-Run against the release variant on the physical phone (`Starting 11 tests on Pixel 9 - 17` →
-`0 failed`), and previously on the emulator. Note the OS: **API 37, one level above the
-`compileSdk` of 36**, so the whole suite is also evidence that nothing breaks on the next
+Eleven run against the release variant on the physical phone (`Starting 11 tests on
+Pixel 9 - 17` → `0 failed`), and previously on the emulator. Note the OS: **API 37, one level
+above the `compileSdk` of 36**, so the suite is also evidence that nothing breaks on the next
 Android release.
 
-> **These tests are destructive.** The summary suite clears chunks, segments and summaries
-> from the real app database, and Gradle uninstalls the app afterwards. `verify-on-device.ps1`
-> therefore skips them unless `-RunTests` is passed explicitly — never run them on a phone
-> holding recordings you want to keep.
+The other five are `d2_baseModelSustainsRealtimeThroughput` (passing — see §6) and the four
+listed under [Not yet verified](#not-yet-verified), which are written and compile but have not
+completed a run.
+
+> **These tests are destructive.** `SummaryEngineInstrumentedTest` and
+> `AcousticCaptureInstrumentedTest` both call `deleteAll()` on the real app database, and
+> Gradle **uninstalls the app afterwards** — which also wipes app-private storage, including
+> the downloaded model, and drops the runtime permission grants and the battery-optimisation
+> exemption. Always re-run `verify-on-device.ps1` after a test run, not a bare `adb install`.
+>
+> `verify-on-device.ps1` skips the suite unless `-RunTests` is passed explicitly. Never run it
+> on a phone holding recordings you want to keep.
+>
+> Note that `-RunTests` currently **fails the build**: the suite now contains four tests
+> (`IndicSpeechInstrumentedTest` ×3, `AcousticCaptureInstrumentedTest` ×1) that have never
+> completed a run. Target the eleven known-good ones with
+> `-Pandroid.testInstrumentationRunnerArguments.class=...` until those pass.
 
 | Test | Proves |
 |---|---|
@@ -64,7 +77,11 @@ Transcription of whisper.cpp's own `jfk.wav` fixture:
 
 > `and so my fellow americans ask not what your country can do for you ask what you can do for your country.`
 
-## 4. Live run on device
+## 4. Live run — **emulator only**
+
+Everything in this section and the next ran on the **Android 16 x86_64 emulator**, while the
+phone was unreachable over ADB. Neither has been repeated on the Pixel 9 — see
+[Not yet verified](#not-yet-verified).
 
 Recording started with the chunk length set to 1 minute:
 
@@ -92,7 +109,7 @@ Database immediately after:
 UI verified by screenshot: Today (idle + listening), Settings (models, language, capture,
 summary, storage, danger zone), Summary (empty state and rendered summary).
 
-## 5. The 11 PM chain, fired for real
+## 5. The 11 PM chain, fired for real — **emulator only**
 
 With recording **off** — the common case at 11 PM, and the path that needs the `dataSync`
 promotion because the microphone type would be refused from a background start.
@@ -185,6 +202,21 @@ figure — Tiny, not Base — never meant anything.
 ---
 
 ## Not yet verified
+
+**The app is not currently installed on the phone.** Gradle's `connectedAndroidTest` uninstalls
+both APKs when it finishes, including after a failure, so the last test run left the device
+empty — no app, no downloaded model, no permission grants, no battery-optimisation exemption.
+Re-running `scripts\verify-on-device.ps1` restores all of it.
+
+**The 11 PM chain on Android 17.** Section 5 fired the whole chain successfully, but on API 36.
+The Pixel is API 37, and foreground-service promotion is the single most likely place for a
+next-OS regression — the `dataSync` path is what makes a summary-only wake-up legal when the
+microphone type would be refused from a background start. Firing
+`SummaryAlarmReceiver` with `am broadcast` and watching for
+`ForegroundServiceStartNotAllowedException` / `could not enter foreground` is the check.
+
+**A real capture run on the phone.** Section 4's live run was on the emulator, against digital
+silence. Sample-exact rotation and post-transcript deletion are proven; hearing anything is not.
 
 **Audio → Devanagari, end to end.** `d_transcribesKnownSampleCorrectly` uses `jfk.wav`, which
 is English, and the Devanagari tests seed *text* directly into Room — they exercise the

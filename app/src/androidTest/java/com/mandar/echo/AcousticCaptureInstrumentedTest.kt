@@ -43,6 +43,11 @@ import kotlin.math.sqrt
  *
  * Playing through the loudspeaker into the same phone's mic is a crude room, but
  * it is a genuine acoustic path, and it is reproducible without a person present.
+ *
+ * WARNING — DESTRUCTIVE, and it makes noise. This clears every chunk from the real
+ * application database so the captured chunk can be identified unambiguously, and
+ * it raises the media volume to maximum and plays speech out loud. Never run it
+ * against a phone holding recordings you want to keep.
  */
 @RunWith(AndroidJUnit4::class)
 class AcousticCaptureInstrumentedTest {
