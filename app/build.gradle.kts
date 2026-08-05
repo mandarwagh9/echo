@@ -22,9 +22,17 @@ android {
 
         ndk {
             // arm64-v8a is the only ABI a real phone needs. x86_64 is here purely
-            // so the pipeline can be verified end-to-end on an emulator; drop it
-            // to halve the native payload.
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // so the pipeline can be verified end-to-end on an emulator, and it
+            // roughly doubles the native payload.
+            //
+            //   ./gradlew :app:assembleRelease -PechoAbi=arm64-v8a
+            //
+            // builds the phone-only APK, which is what you want for sideloading.
+            val requested = (project.findProperty("echoAbi") as String?)
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+            abiFilters += requested ?: listOf("arm64-v8a", "x86_64")
         }
         externalNativeBuild {
             cmake {
@@ -110,8 +118,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.navigation:navigation-compose:2.8.5")
+    // No material-icons-extended. It bundles ~1,500 vector icons as generated
+    // Kotlin, which cost about 30 MB of dex -- two thirds of the APK -- and this
+    // app draws every glyph it uses itself in ui/components/Primitives.kt.
 
     val room = "2.6.1"
     implementation("androidx.room:room-runtime:$room")

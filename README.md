@@ -42,9 +42,12 @@ mic ──► 10-minute WAV chunks ──► on-device Whisper ──► transcr
 ```bash
 git clone --recurse-submodules https://github.com/mandarwagh9/echo.git
 cd echo
-./gradlew :app:assembleRelease
+./gradlew :app:assembleRelease -PechoAbi=arm64-v8a
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+`-PechoAbi=arm64-v8a` builds for phones only — 24.5 MB. Omit it to also bundle `x86_64` for
+emulator testing, at 28.8 MB.
 
 whisper.cpp is a submodule pinned to **v1.9.2**; if you already cloned without
 `--recurse-submodules`, run `git submodule update --init`.
