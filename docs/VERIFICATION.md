@@ -1,6 +1,21 @@
 # Verification record
 
-What was actually run, and what it proved. Dated 2026-08-05.
+What was actually run, and what it proved. Dated 2026-08-05, with the transcription-queue
+rewrite (`6639bc0`) appended 2026-08-06.
+
+Sections 1–9 are the pre-rewrite record and are unchanged except where the rewrite invalidated
+them, which is marked inline. Sections 10 and 11 cover the cloud backend.
+
+**Every queue-rewrite claim in this document is either a code read or a figure recorded by the
+commit that made the change. No part of the rewrite has been observed running on the phone**
+— see [Not yet verified](#not-yet-verified), which is the longest section here for that
+reason. Nothing below was re-run in the session that wrote this update; where a number is
+carried over from a commit message it says so.
+
+Every **queue-rewrite** code read here is against the committed Echo tree at `6639bc0`. The
+working tree held uncommitted, incomplete follow-up work while this was being written, and none
+of it is described here as having landed. (§11 reads a different repo at a different commit and
+says so.)
 
 **Environment:** JDK 17 · Android SDK 36 · NDK 27.1.12297006 · CMake 3.22.1 ·
 whisper.cpp v1.9.2 (`306c88f4`).
@@ -19,20 +34,33 @@ Android 16 (API 36) x86_64 emulator, used while the phone was unreachable over A
 | Native libs packaged | `libecho_whisper`, `libggml`, `libggml-base`, `libggml-cpu`, `libomp`, `libc++_shared` |
 | Release APK | 49.9 MB, signed, installs |
 
-## 2. JVM unit tests — 42 passing
+Measured before `6639bc0`, which touched `app/build.gradle.kts` and added ~2,400 lines of
+Kotlin but no native code. The release APK has not been rebuilt or re-measured since.
 
-- **`ChunkMathTest`** — the "every minute is recorded" guarantee. Asserts the split sizes
-  always sum to the buffer length, walking a full chunk one buffer at a time, including the
-  case where the chunk size is not a multiple of the buffer size, and where a buffer spans
-  several chunks.
-- **`WavWriterTest`** — header field correctness, size patching on close, value-exact round
-  trip, offset writes, idempotent close, and recovery of a chunk truncated by a crash.
-- **`VoiceActivityDetectorTest`** — digital silence and quiet room tone reject; sustained
-  speech over a quiet floor accepts.
-- **`TextToolsTest`** — tokenisation and stopwords across English *and* Devanagari, danda
-  sentence splitting, TF-IDF distinctiveness, TextRank ordering, name heuristics.
-- **`SummarySchedulerTest`** — next-11-PM arithmetic before, after and exactly at the target.
-- **`SummaryFormatTest`** — duration, language-name and percentage rendering.
+## 2. JVM unit tests — 89
+
+Recorded green at `6639bc0`; **not re-run in the session that wrote this document.** Counted
+by `@Test` method, the suite is:
+
+| File | Tests | Covers |
+|---|---|---|
+| `ChunkMathTest` | 9 | the "every minute is recorded" guarantee — split sizes always sum to the buffer length, walking a full chunk one buffer at a time, including a chunk size that is not a multiple of the buffer size and a buffer spanning several chunks |
+| `WavWriterTest` | 7 | header fields, size patching on close, value-exact round trip, offset writes, idempotent close, recovery of a chunk truncated by a crash |
+| `VoiceActivityDetectorTest` | 5 | digital silence and quiet room tone reject; sustained speech over a quiet floor accepts |
+| `VoicedGateTest` | 9 | the compacted voiced stream and `originalMs` — mapping a backend timestamp back through the gate to wall-clock |
+| `AudioGainTest` | 7 | 99.5th-percentile headroom (§8) |
+| `SummaryTest` | 27 | tokenisation and stopwords across English *and* Devanagari, danda sentence splitting, TF-IDF distinctiveness, TextRank ordering, name heuristics, next-11-PM arithmetic, duration/language/percentage rendering |
+| **`BatchProtocolTest`** | **24** | the wire contract, as pure functions over `(status, body)` with no socket: every submit and poll outcome, classified transient-or-permanent exactly once |
+| `JsonRealityCheckTest` | 1 | `org.json` behaviour the protocol relies on, asserted rather than assumed |
+
+`BatchProtocolTest` is the part worth calling out. The original hang was that `poll()` used
+`isNotBlank()` as a readiness test, so `200 {"status":"completed","transcript":""}` — an
+ordinary success — was unrepresentable and the client waited forever for a state that had
+already happened. The table tests exist so that outcome has a name.
+
+**What these tests cannot prove:** they run against the protocol, not against a socket and not
+against the deployed service. The queue's own state machine — claim, park, lease recovery,
+`cloud_jobs` resume — has no JVM test at all, because it needs a database.
 
 ## 3. Instrumented tests — 11 of 16 passing on the Pixel 9
 
@@ -76,6 +104,18 @@ completed a run.
 Transcription of whisper.cpp's own `jfk.wav` fixture:
 
 > `and so my fellow americans ask not what your country can do for you ask what you can do for your country.`
+
+> **These eleven results predate the queue rewrite (`6639bc0`) and four of them are now
+> stale.** `processNext()` used to return true after any claim; it now returns true only on a
+> *terminal* outcome and false on a park, so the asserts at
+> `WhisperPipelineInstrumentedTest.kt:220/271/300` and `AcousticCaptureInstrumentedTest.kt:259`
+> no longer hold. Independently, the claim query now takes the **oldest** claimable chunk, not
+> the test's freshly inserted one, so on a device with a backlog the assert can fail against a
+> chunk the test never created. `f_pipelineTranscribesThenDeletesAudio` additionally fails on
+> content if the cloud backend is selected: the default language is `auto`, which posts as
+> `hi-IN`, and English `jfk.wav` through IndicConformer-as-Hindi cannot contain "country".
+>
+> None of this was re-run. Fixing the tests is pending work, not a verified result.
 
 ## 4. Live run — **emulator only**
 
@@ -173,6 +213,26 @@ was logged, so the `dataSync` promotion was accepted.
 11. **"0 min of talk"** and **"0% of the day"** — durations and percentages derived from
     truncated whole minutes. Percentages now come from seconds, and sub-minute reads as
     "under a minute" / "<1%".
+
+The next three were the live symptom "18 chunks queued, 0 words written", and none of them was
+visible to any test. They are what `6639bc0` exists to fix; the fixes themselves are code
+reads, not device runs — see [Not yet verified](#not-yet-verified).
+
+12. **An empty transcript was unrepresentable.** `poll()` used `isNotBlank()` as a readiness
+    test. The server answers a silent job with `200 {"status":"completed","transcript":""}`,
+    an ordinary success — so the client waited forever for a state that had already happened.
+    Readiness is now *key presence*, and every wire outcome is a named case classified
+    transient-or-permanent exactly once, with 24 table tests.
+13. **Every server-side failure logged an empty reason.** The client read `error`; the server
+    writes `error_message` on the status path.
+14. **`en-IN` was silently transcribed as Malayalam.** It is absent from the server's
+    `LANG_MAP` and the batch path does not validate the code, so it coerces to `ml`. The
+    failure looked like success: HTTP 200, non-empty text, stored and labelled English.
+    English is now never sent to the server.
+15. **A cold server permanently downgraded a chunk.** Waiting on something external counted as
+    a failed attempt, so three network blips exhausted a chunk's retries and handed it to an
+    engine measured at 0.00 word recall on Marathi. Waiting is now a *park*, which never
+    touches `attempts`.
 
 ---
 
@@ -287,6 +347,87 @@ one that failed. Reasoning about it would have shipped a regression.
 
 ---
 
+## 10. The cloud backend: which model, measured
+
+Word recall against known references, same fixtures, same day. This is the measurement that
+justifies the whole park-instead-of-fall-back policy in
+[SYSTEM_DESIGN §5.3](SYSTEM_DESIGN.md#53-why-parking-exists):
+
+| | Hindi | Marathi | code-switched |
+|---|---|---|---|
+| Whisper Base (on-device default) | 0.23 | **0.00** | 0.08 |
+| Whisper Small (on-device) | 0.54 | 0.13 | 0.38 |
+| **IndicConformer-600M (server)** | **1.00** | **1.00** | 0.67\* |
+
+\* Scoring artefact, not a model failure: IndicConformer transliterates "sensor" and "pending"
+into Devanagari while the reference keeps them in Latin. The sentence is right. Chirp 2 does
+the same thing — and turns उद्या into उदय on Marathi, which IndicConformer does not.
+
+Whisper is an English model that tolerates Hindi. IndicConformer-600M is AI4Bharat's, built
+for 22 Indian languages. **0.00 on Marathi is not "worse", it is nothing** — a day of Marathi
+through Whisper produces a transcript that is not a transcript. No amount of gate or gain
+tuning closes a gap that size; the model was the limit, not the pipeline.
+
+Verified live against the deployed service at `4a66975`: Marathi and Hindi both returned word
+for word in ~2.5 s round trip, and an unauthenticated request was rejected 403.
+
+## 11. The wire contract, checked against the server's source
+
+`vexyl-stt` is the user's own server, so its source can be read rather than probed. Eleven
+client-side assumptions were checked line by line against
+`C:\Users\Mandar\vexyl-stt\vexyl_stt_server.py` at commit `4f674d9`, and all eleven hold:
+
+- `POST /batch/transcribe` returns **201** with `job_id` and `audio_duration`.
+- `GET /batch/status/{id}` returns 200 for any known job with `status` in exactly
+  `{queued, processing, completed, failed}`, and 404 for an unknown one.
+- A COMPLETED job **always carries the `transcript` key**, with a `str` value that may be `""`.
+  Missing-key and `null` are both unreachable in the server. This is what makes key-presence
+  the correct readiness test and the original hang unrepresentable.
+- A failure reason is written to `error_message` on the status path and `error` on submit
+  refusals. The client reads each in the right place. (`error_message` is always the literal
+  `"Transcription failed"`, so it carries no diagnostic content.)
+- Jobs live in an in-process dict with no persistence, swept ~3600–3900 s after `completed_at`.
+  The client's 1-hour `JobGone` threshold is the right order.
+- Caps are 300 s and 25 MB. A 120 s piece is ~3.84 MB — 6.5× under.
+- One inference at a time, behind a global lock, with a single batch worker draining a single
+  queue. The client's one-outstanding-job rule is accurate.
+- `/health` is served **before** the API-key check, and returns the hardcoded model name the
+  client fingerprints. It also does not bind until the model is loaded and warmed, so a green
+  `/health` means more than "the container is listening".
+- `LANG_MAP` has 14 languages and no English entry, and the batch path does **not** validate
+  `language_code` — it coerces anything unmapped to Malayalam. An `en-IN` upload returns
+  HTTP 200 with plausible Malayalam-script text. Keeping English off the client's supported
+  set is load-bearing, not tidiness.
+- A missing `Content-Length` yields `400 {"error": "Missing 'file' field..."}`, traced end to
+  end. The ban on `setChunkedStreamingMode` prevents a silent 100% upload failure behind a
+  misleading error.
+- 403 on the status path is plain text; on the POST path it is JSON. Classifying by status
+  code on both is the only shape-independent way to be right.
+
+**This is a source read, not a probe.** Every item above is conditional on the deployed Cloud
+Run revision matching that checkout, which was **not** checked. The Cloud Run flags the client
+comments cite (`--startup-probe-period=10 × --startup-probe-failure-threshold=12` = the 120 s
+wake budget, `--min-instances=0`, `--concurrency=50`, `--timeout=3600`) come from an
+**uncommitted** `deploy.sh`.
+
+Three things the read turned up that the client does not account for:
+
+1. **A transient server-side inference failure is made permanent.** The server writes FAILED
+   from a blanket `except Exception` with a fixed string — OOM, a torch allocation failure and
+   a genuinely malformed input are indistinguishable. The client marks the piece REJECTED
+   forever. A whole-chunk rejection falls through to Whisper; a **per-piece** rejection is
+   silently dropped and reaches no engine at all, leaving a hole that pins the chunk's 19 MB
+   with nothing that ever redoes or releases it.
+2. **The 429 threshold is dead code for this client.** It fires at 1000 pending jobs, and each
+   queued job pins 7.68 MB of float32 PCM on a 4 GiB instance. The server would OOM around 999.
+   The client's one-outstanding-job rule is what protects the *server*, not merely itself.
+3. **The multipart parser strips a character set, not a delimiter** — `part.strip(b"\r\n")`
+   eats every trailing byte in `{0x0D, 0x0A}`. Measured impact: `sf.read` accepts the short
+   `data` chunk without error and returns one fewer frame, so ~62 µs off the end of a 120 s
+   piece. Real bug, server-side fix, negligible. Do not paper over it with a client-side pad.
+
+---
+
 ## Not yet verified
 
 **The app is not currently installed on the phone.** Gradle's `connectedAndroidTest` uninstalls
@@ -294,7 +435,81 @@ both APKs when it finishes, including after a failure, so the last test run left
 empty — no app, no downloaded model, no permission grants, no battery-optimisation exemption.
 Re-running `scripts\verify-on-device.ps1` restores all of it.
 
-**The 11 PM chain on Android 17 — partially verified, and no longer manually testable.**
+### The transcription queue rewrite has never run on hardware
+
+`6639bc0` rebuilt the queue into a durable state machine. **Not one line of it has executed on
+a phone.** What exists is 89 JVM unit tests (§2), a line-by-line read of the migration SQL
+against the schema Room generates, and a line-by-line read of the server (§11). Specifically
+unobserved:
+
+- **The park/resume cycle.** A chunk going `PENDING → TRANSCRIBING → park → PENDING` and being
+  re-claimed later has never happened outside a code read. Nor has the claim ordering that puts
+  a chunk with an outstanding server job at the head of the queue.
+- **`cloud_jobs` surviving a park.** The entire point of making piece state durable is that
+  resuming continues the server's job instead of re-uploading megabytes it still holds. The
+  resume path (`streamFingerprint` matches → reuse rows) has never been exercised against a
+  real server round.
+- **The lease.** `LEASE_TIMEOUT_MS` (45 min), `requeueStale`, and `LeaseLostException` rolling
+  a commit back have no test and no observed occurrence. The lease timeout is also *shorter*
+  than a legitimate worst-case cloud round (five 120 s pieces × a 16-minute poll ceiling each,
+  plus a 120 s wake probe), which is harmless only because one coroutine runs the sweep and the
+  claim as sequential statements.
+- **`MIGRATION_1_2` against a real populated database.** The SQL was verified by reading it
+  against Room's generated schema — `exportSchema` is off, so nothing validates it at build
+  time — but it has not been run over a database with the user's actual rows in it. There is
+  deliberately no `fallbackToDestructiveMigration`, so a mistake here is a crash, not a wipe.
+- **The 1.00/1.00 IndicConformer figures are from fixtures posted to the deployed service, not
+  from Echo's own queue end to end.** No transcript has been produced by
+  `TranscriptionPipeline → CloudTranscriber → server → segments in Room` on the phone.
+- **Whether the deployed Cloud Run revision matches the `vexyl-stt` checkout §11 was read
+  against.** Every server claim is conditional on that.
+- **`FIRST_POLL_FRACTION = 0.35` and `POLL_CEILING_FACTOR = 8`** rest on "IndicConformer runs
+  at roughly 2–3× realtime on a 2 vCPU CPU-only instance", which is stated as fact in a comment
+  and is benchmarked nowhere. If the true factor is worse than 8×, the symptom is a park at the
+  ceiling with `progressed = true` — benign but slow. This needs a measurement, not a source
+  read.
+
+### Known-broken as read at `6639bc0`
+
+These were found by reading the committed tree after the rewrite, and each is recorded in
+[SYSTEM_DESIGN §5](SYSTEM_DESIGN.md#5-transcription-queue) with the mechanism that does or does
+not enforce it. None is speculative. None had been fixed in a committed state when this was
+written, and **none has been observed on hardware in either direction** — so a fix landing
+after this date does not update this list by itself. Check the tree before trusting an entry.
+
+1. **The leftover sweep can delete audio the user asked to keep**, on every pipeline start.
+   A startup sweep sees only rows — no settings, no memory of what the committing run decided
+   — so its predicate has to match a decision that was *recorded*. `audioHold IS NULL` records
+   nothing, and it is character-for-character the state a cleanly transcribed chunk is left in
+   when "keep audio after transcription" is on. Deterministic, destroys data, new in this
+   commit. The fix shape is a positive *cleared for release* marker written in the same
+   transaction as the terminal status, so the sweep only finishes a job it can see was started.
+2. **A held chunk is invisible and permanent.** `requeueDegraded` / `degradedCount` — the
+   queries written to find and redo a held chunk — have no callers, so nothing ever redeems
+   one. Their predicate also keys on `transcriptSource = 'device'`, a proxy that cannot see a
+   *cloud* transcript with a hole, which is the commonest hold; `coveredMs`, the column that
+   records exactly that evidence, appears in no `WHERE` clause anywhere. Because nothing
+   releases held bytes, `underPressure` is a one-way latch: past 1 GB the cloud is bypassed
+   permanently and the app silently reverts to the 0.00-Marathi engine.
+3. **Summaries lie about a parked day.** `SummaryEngine` buckets only `DONE`/`SILENT`/`FAILED`
+   while counting every chunk, so a day recorded against a cold server reports hours captured,
+   "no speech detected", "0 words transcribed" and no failure line — and notifies the user
+   with it. `summaries.provisional` and `ChunkDao.unsettledBetween` were added for exactly this
+   and are wired to nothing.
+4. **A FAILED chunk whose WAV is gone can never be retired** and retries forever, resetting
+   `attempts` each time, so the "Retry N failed" button appears to do nothing.
+   `discardFailedWithoutAudio` matches `filePath IS NULL`, which that path never sets.
+5. **A SUBMITTED `cloud_jobs` row can outlive its chunk**, and one orphan is enough to park
+   every other chunk's cloud path for the life of the install. Two independent gaps have to
+   hold for it: the rows are not settled on *every* terminal edge (`clearForChunk` is missing
+   from `failChunk` and from the catch-all), and the gate query asks only "is any row
+   SUBMITTED" rather than "is any row SUBMITTED for a chunk somebody will come back for".
+   Closing either one alone would defuse it.
+
+### The 11 PM chain has never been observed firing on Android 17
+
+The chain fired end to end exactly once, on the **Android 16 (API 36) emulator** (§5). It has
+not been seen on the Pixel 9 (API 37), and on API 37 it can no longer be provoked by hand.
 
 What *is* confirmed on the Pixel (API 37):
 
@@ -307,21 +522,34 @@ type=RTC_WAKEUP origWhen=2026-08-05 23:00:00.000 window=0 exactAllowReason=polic
 `USE_EXACT_ALARM` was auto-granted. The app is also in standby bucket **5 (exempted)** and on
 the deviceidle whitelist, so neither App Standby nor Doze should defer it.
 
-What could **not** be re-tested: firing the receiver by hand. `SummaryAlarmReceiver` is
+That is the alarm being *armed*. Nothing above shows it being *delivered*, the receiver
+running, the service promoting, or a summary being written — on this OS.
+
+**The receiver cannot be hand-triggered on API 37.** `SummaryAlarmReceiver` is
 `exported="false"`, and on API 37 an explicit `am broadcast` from the shell to a non-exported
 component is enqueued and then silently dropped — the receiver's first line never logs. This
 worked on the API 36 emulator (§5) and does not any more. It is a testing limitation rather
 than a defect: the real alarm is delivered by AlarmManager to the app's own PendingIntent,
-which is not subject to that check. The receiver was deliberately **not** exported to make it
-testable, because an exported receiver that triggers transcription and notification is a
-security hole in an app that records people.
+which is not subject to that check. The receiver was deliberately **not** exported, because an
+exported receiver that triggers transcription and notification is a security hole in an app
+that records people — so this will not be made testable by exporting it.
 
-So the still-unverified part on API 37 is narrow but real: the `dataSync` foreground-service
-promotion used when the summary fires while **not** recording. Recording at the time makes the
-question moot, and it is the common case at 11 PM that it is not.
+The only remaining way to verify the chain on API 37 is to leave the app installed and running
+across a real 23:00. That has not been done.
+
+Two parts are specifically unverified on API 37 as a result:
+
+- The `dataSync` foreground-service promotion used when the summary fires while **not**
+  recording. Recording at the time makes the question moot, and it is the common case at 11 PM
+  that it is not.
+- Whether the summary the chain produces is *honest*. See "Known-broken" item 3 above — a day
+  with parked chunks currently produces a summary that says nothing was transcribed. That
+  headline is what the 11 PM notification shows.
 
 **A real capture run on the phone.** Section 4's live run was on the emulator, against digital
-silence. Sample-exact rotation and post-transcript deletion are proven; hearing anything is not.
+silence. Sample-exact rotation and post-transcript deletion are proven *on that build*;
+hearing anything is not, and the deletion logic has since been rewritten around `audioHold`
+and has not been re-observed anywhere.
 
 **Audio → Devanagari, end to end.** `d_transcribesKnownSampleCorrectly` uses `jfk.wav`, which
 is English, and the Devanagari tests seed *text* directly into Room — they exercise the
@@ -346,6 +574,11 @@ Two things make this less alarming than it sounds and one makes it worse:
   busy. Tightening it would cut compute *and* quality-harming noise at once, and is the single
   highest-value change left. Base at roughly 2.5× Small's speed is the fallback that keeps up
   today, at about half the Hindi accuracy.
+
+The cloud backend changes this arithmetic and has not been measured against it. On CLOUD the
+phone's constraint stops being CPU and becomes upload bandwidth plus a server that runs one
+job at a time — 88% of 600 s is five 120 s pieces, serialised, per chunk. Whether that drains
+a waking day is unknown; nothing has measured it.
 
 **Real far-field human speech, scored.** The 445-word chunk above has not been checked against
 what was actually said. TTS fixtures are clean, close-miked and studio-grade; they cannot tell

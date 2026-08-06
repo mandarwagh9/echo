@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.mandar.echo.EchoApp
 import com.mandar.echo.audio.EchoServiceState
 import com.mandar.echo.audio.RecordingService
+import com.mandar.echo.data.AudioHold
 import com.mandar.echo.data.ChunkEntity
 import com.mandar.echo.data.SegmentEntity
 import com.mandar.echo.data.Settings
@@ -54,6 +55,14 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
 
     val failedChunks: StateFlow<List<ChunkEntity>> = echo.db.chunkDao().failedChunks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Chunks whose audio is being kept because a better transcript is still
+     * possible. Without somewhere to show it the hold is a promise nothing keeps:
+     * the audio is retained forever and the redo it was retained for never happens.
+     */
+    val redoableChunks: StateFlow<Int> = echo.db.chunkDao().redoableCount(AudioHold.REDOABLE)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     private val _levels = MutableStateFlow<List<Float>>(emptyList())
     val levels: StateFlow<List<Float>> = _levels
@@ -195,7 +204,18 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun retryFailedChunks() {
-        viewModelScope.launch { echo.db.chunkDao().retryAllFailed() }
+        viewModelScope.launch {
+            // A failed chunk whose audio is gone can only fail again, and the retry
+            // query skips it by design, so it would otherwise sit in the count for
+            // ever with a button that provably cannot clear it.
+            echo.db.chunkDao().discardFailedWithoutAudio()
+            echo.db.chunkDao().retryAllFailed()
+        }
+    }
+
+    /** Queues the held chunks to be transcribed again, against whatever backend is configured now. */
+    fun redoHeldChunks() {
+        viewModelScope.launch { echo.db.chunkDao().requeueRedoable(AudioHold.REDOABLE) }
     }
 
     fun whisperSystemInfo(): String = echo.whisper.systemInfo()

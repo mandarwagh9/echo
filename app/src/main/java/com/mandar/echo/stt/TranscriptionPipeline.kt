@@ -4,8 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.mandar.echo.audio.AudioFormatSpec
 import com.mandar.echo.audio.AudioGain
+import com.mandar.echo.audio.DiskSpace
 import com.mandar.echo.audio.VoiceActivityDetector
 import com.mandar.echo.audio.WavWriter
+import com.mandar.echo.data.AudioHold
 import com.mandar.echo.data.ChunkEntity
 import com.mandar.echo.data.ChunkStatus
 import com.mandar.echo.data.EchoDatabase
@@ -15,13 +17,16 @@ import com.mandar.echo.data.SegmentEntity
 import com.mandar.echo.data.Settings
 import com.mandar.echo.data.SttBackend
 import com.mandar.echo.data.TranscriptSource
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 private const val TAG = "TranscriptionPipeline"
@@ -93,18 +98,43 @@ class TranscriptionPipeline(
         const val IDLE_MS = 8_000L
 
         /**
+         * How long a chunk that failed for an unknown reason waits before its next
+         * attempt.
+         *
+         * `finishChunk` used to zero `notBefore` on the way back to PENDING, and
+         * `nextClaimableId` prefers a chunk holding server work, so all three
+         * attempts were spent inside the same second. Anything transient — a radio
+         * handover, a moment of memory pressure — therefore cost the whole budget.
+         */
+        const val FAIL_BACKOFF_MS = 60_000L
+
+        /**
          * Ceiling on WAV Echo will hold back from deletion.
          *
          * Parking rather than falling back means a long outage releases no audio at
-         * all, and 19 MB per ten-minute chunk reaches the recorder's own low-storage
-         * pause in about a day. Past this point a degraded transcript beats no
-         * recording, so the cloud is bypassed and the audio released — the trade is
-         * made deliberately and logged, instead of arriving as a silent stop.
+         * all. Past this point a degraded transcript beats no recording, so the
+         * cloud is bypassed — the trade is made deliberately and logged, instead of
+         * arriving as a silent stop. The disk is the *other* half of the valve; see
+         * [relieveAudioPressure], which decides which audio actually goes.
          */
         const val MAX_RETAINED_BYTES = 1_000_000_000L
 
         /** Per-piece integer division can lose a millisecond or two across a chunk. */
         const val HOLE_TOLERANCE_MS = 1_000L
+
+        /**
+         * Claims that ended with nothing recorded before a chunk is retired.
+         *
+         * The counter exists because `attempts` cannot see a crash loop: it is only
+         * bumped from a catch block, which a SIGSEGV in the JNI layer or the
+         * low-memory killer never reaches. A chunk that reliably kills the process
+         * is claimed first on every boot — `nextClaimableId` orders oldest first —
+         * so nothing behind it is ever transcribed again. Retiring it to FAILED
+         * keeps its audio and puts it behind the same retry button as any other
+         * failure, which is the difference between one lost chunk and a queue that
+         * never advances.
+         */
+        const val MAX_ABANDONED_CLAIMS = 3
     }
 
     private val appContext = context.applicationContext
@@ -119,7 +149,8 @@ class TranscriptionPipeline(
     // Rebuilt only when the server settings actually change, so the transport's
     // bounded dispatcher and the gate's backoff survive across chunks.
     private var cloud: CloudTranscriber? = null
-    private var cloudIdentity: String? = null
+    private var cloudUrl: String? = null
+    private var cloudKey: String? = null
 
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
@@ -136,6 +167,11 @@ class TranscriptionPipeline(
                 .onFailure { Log.e(TAG, "leftover audio sweep failed", it) }
             runCatching { reconcileOrphanAudio() }
                 .onFailure { Log.e(TAG, "orphan audio sweep failed", it) }
+            // A backlog held from an earlier run is over the cap the moment this
+            // process starts, and if nothing new settles — the server came back, so
+            // every chunk is already DONE — no later pass would ever look.
+            runCatching { relieveAudioPressure() }
+                .onFailure { Log.e(TAG, "audio pressure relief failed", it) }
 
             lastStaleSweep = clock()
 
@@ -144,6 +180,12 @@ class TranscriptionPipeline(
                 val worked = runCatching { processNext() }
                     .onFailure { Log.e(TAG, "pipeline iteration failed", it) }
                     .getOrDefault(false)
+                // Only a settled chunk can have produced audio the valve is allowed
+                // to trade, and only a settled chunk changes what is being held.
+                if (worked) {
+                    runCatching { relieveAudioPressure() }
+                        .onFailure { Log.e(TAG, "audio pressure relief failed", it) }
+                }
                 if (!worked) delay(idleWait())
             }
         }
@@ -217,6 +259,11 @@ class TranscriptionPipeline(
             return false
         }
 
+        if (chunk.abandonedClaims >= MAX_ABANDONED_CLAIMS) {
+            retireCrashingChunk(chunk, lease)
+            return true
+        }
+
         _state.value = _state.value.copy(
             busy = true,
             currentChunkId = chunk.id,
@@ -247,6 +294,17 @@ class TranscriptionPipeline(
             /** Voiced ms this transcript actually accounts for. */
             val coveredMs: Long,
             val elapsedMs: Long,
+            /**
+             * A better transcript of this audio is still plausibly available, so the
+             * WAV is worth keeping.
+             *
+             * Carried from the run rather than re-derived from [source], because
+             * "the weaker engine wrote this because the server was unreachable" and
+             * "the weaker engine wrote this because the server refused the audio"
+             * produce identical rows and want opposite answers: only the first is
+             * worth redoing.
+             */
+            val provisional: Boolean,
         ) : Attempt
 
         /** Nothing is wrong; the thing we need has not happened yet. */
@@ -268,21 +326,21 @@ class TranscriptionPipeline(
             // Nothing to transcribe and nothing recoverable. FAILED with no
             // filePath is retired by discardFailedWithoutAudio rather than retried
             // forever, one attempt at a time, with no way for the user to clear it.
-            chunkDao.finishChunk(
-                id = chunk.id,
+            val landed = settle(
+                chunk = chunk,
                 lease = lease,
                 status = ChunkStatus.FAILED,
                 attempts = chunk.attempts + 1,
                 error = "audio file missing",
-                transcribeMs = null,
                 speechRatio = chunk.speechRatio,
-                wordCount = 0,
-                transcriptSource = null,
                 voicedMs = 0,
-                coveredMs = 0,
-                audioHold = null,
+                hold = null,
             )
-            runCatching { db.cloudJobDao().clearForChunk(chunk.id) }
+            // The path points at nothing, so the row must stop claiming otherwise:
+            // it was still counted in the retained-audio total, and
+            // discardFailedWithoutAudio — the one thing that can retire it — matches
+            // on filePath IS NULL and so could never see it.
+            if (landed && chunk.filePath != null) chunkDao.markAudioDeleted(chunk.id)
             return true
         }
 
@@ -292,7 +350,21 @@ class TranscriptionPipeline(
             val samples = WavWriter.readAsFloats(file)
             val vad = VoiceActivityDetector.analyse(samples)
 
-            if (cfg.skipSilentChunks && !vad.hasSpeech) {
+            // `wordCount > 0` vetoes the silence short-circuit, and it has to.
+            //
+            // This chunk can be here for the second time: a redo re-runs the gate
+            // with today's settings, and the two silence tests do not agree —
+            // analyse() wants 2% of frames above the noise floor, extractVoiced()
+            // keeps any merged run of 400 ms. A ten-minute chunk holding one
+            // sentence fails the first and passes the second. So a user who turned
+            // "skip silent chunks" on and then tapped Redo, hoping for a better
+            // transcript, instead ran commitSilent over a chunk that already had
+            // one: settle() clears the chunk's segments before writing, so the text
+            // was destroyed, the row went SILENT, and the WAV was released. It then
+            // appeared in neither the failed list nor the redo list. Words we have
+            // already recovered from this audio are proof it is not silence,
+            // whatever the ratio says this time.
+            if (cfg.skipSilentChunks && !vad.hasSpeech && chunk.wordCount == 0) {
                 Log.i(TAG, "chunk ${chunk.id} is silent (ratio=${vad.speechRatio}); not transcribing")
                 return commitSilent(chunk, lease, attempts, vad.speechRatio, file, cfg)
             }
@@ -315,7 +387,7 @@ class TranscriptionPipeline(
                     "(rms=${"%.4f".format(levelled.inputRms)}, gain=${"%.1f".format(levelled.gain)}x)",
             )
 
-            val underPressure = chunkDao.retainedAudioBytes() > MAX_RETAINED_BYTES
+            val underPressure = underAudioPressure()
 
             return when (val attempt = runBackends(chunk, cfg, levelled.samples, voicedMs, underPressure)) {
                 is Attempt.Park -> {
@@ -329,15 +401,22 @@ class TranscriptionPipeline(
                 }
 
                 is Attempt.Text -> {
-                    commitText(chunk, lease, attempts, attempt, voiced, vad.speechRatio, voicedMs, cfg, underPressure, file)
+                    commitText(chunk, lease, attempts, attempt, voiced, vad.speechRatio, voicedMs, cfg, file)
                     true
                 }
             }
-        } catch (lost: LeaseLostException) {
-            // Another worker owns this chunk now and wrote its own result. Ours is
-            // the copy that must disappear: no attempt burned, no audio deleted.
-            Log.w(TAG, "chunk ${chunk.id}: lease lost mid-run; discarding this result", lost)
-            return true
+        } catch (cancelled: CancellationException) {
+            // A stop is not a crash, but it looks exactly like one from the outside:
+            // the claim is left standing and the next start counts it as a run that
+            // died with nothing recorded. Handing the claim back keeps
+            // `abandonedClaims` counting only the deaths it was written to bound, so
+            // toggling recording during a long chunk cannot retire a healthy one.
+            withContext(NonCancellable) {
+                runCatching {
+                    chunkDao.deferChunk(chunk.id, lease, clock(), chunk.transientFailures, chunk.error)
+                }.onFailure { Log.w(TAG, "chunk ${chunk.id}: could not release the claim on stop", it) }
+            }
+            throw cancelled
         } catch (t: Throwable) {
             Log.e(TAG, "chunk ${chunk.id} failed (attempt $attempts)", t)
             failChunk(
@@ -367,6 +446,11 @@ class TranscriptionPipeline(
         voicedMs: Long,
         underPressure: Boolean,
     ): Attempt {
+        // Whether a cloud transcript is still owed to this audio. False once the
+        // server has answered and refused: the weaker engine is then the best
+        // answer that exists, not a placeholder for a better one.
+        var provisional = false
+
         if (usesCloud(cfg)) {
             val now = clock()
             when (val blocked = gate.blockedReason(now, wifiOnly = false)) {
@@ -374,20 +458,7 @@ class TranscriptionPipeline(
                     is CloudTranscriber.CloudOutcome.Settled -> {
                         gate.noteReachable()
                         gate.clearHalt()
-                        val kept = outcome.pieces.filterNot { it.rejected }
-                        return Attempt.Text(
-                            spoken = kept.filter { it.text.isNotBlank() }.map {
-                                Spoken(
-                                    startMs = it.offsetMs,
-                                    endMs = it.offsetMs + it.durationMs,
-                                    text = it.text.trim(),
-                                    language = it.language,
-                                )
-                            },
-                            source = TranscriptSource.CLOUD,
-                            coveredMs = kept.sumOf { it.durationMs },
-                            elapsedMs = outcome.elapsedMs,
-                        )
+                        return fromCloud(chunk, cfg, outcome, audio, voicedMs)
                     }
 
                     is CloudTranscriber.CloudOutcome.Park -> {
@@ -397,6 +468,7 @@ class TranscriptionPipeline(
                         }
                         if (!underPressure) return Attempt.Park(outcome.reason, parkBackoff(outcome))
                         Log.w(TAG, "chunk ${chunk.id}: held audio over cap; using the on-device engine")
+                        provisional = true
                     }
 
                     is CloudTranscriber.CloudOutcome.Halt -> {
@@ -406,23 +478,37 @@ class TranscriptionPipeline(
                         // because a key was rotated.
                         gate.halt(outcome.reason)
                         if (!underPressure) return Attempt.Park(outcome.reason, PARK_LONG_MS)
+                        provisional = true
                     }
 
                     is CloudTranscriber.CloudOutcome.Rejected -> {
                         // The server understood this audio and refused it. Nothing
                         // better will happen for it, so the weaker engine is now the
-                        // best available answer rather than a downgrade.
+                        // best available answer rather than a downgrade. The piece
+                        // rows go with it: they describe an attempt that is over, and
+                        // a later retry must start from a clean plan.
                         Log.w(TAG, "chunk ${chunk.id}: server refused the audio (${outcome.reason})")
                         runCatching { db.cloudJobDao().clearForChunk(chunk.id) }
                     }
                 }
 
-                else -> if (!underPressure) return Attempt.Park(blocked, parkBackoff(null))
+                else -> {
+                    if (!underPressure) return Attempt.Park(blocked, parkBackoff(null))
+                    provisional = true
+                }
             }
         }
 
         if (!engine.isLoaded) {
-            return Attempt.Park("waiting for a transcriber", PARK_MEDIUM_MS)
+            // Naming the real problem matters most in the one case where the escape
+            // valve has nothing to escape to: there is no on-device model, so the
+            // backlog cannot be drained at any price and the recorder is walking
+            // into its own low-storage pause.
+            return Attempt.Park(
+                if (underPressure) "storage is filling up and no on-device model is installed"
+                else "waiting for a transcriber",
+                PARK_MEDIUM_MS,
+            )
         }
 
         val result = engine.transcribe(audio, cfg.language.code)
@@ -435,7 +521,96 @@ class TranscriptionPipeline(
             // Whisper saw the whole compacted stream, so there is no hole to record.
             coveredMs = voicedMs,
             elapsedMs = ok.elapsedMs,
+            provisional = provisional,
         )
+    }
+
+    /**
+     * Assembles a settled cloud run, covering any piece the server returned no text
+     * for with the on-device engine.
+     *
+     * A whole-chunk rejection already falls through to that engine; a per-piece one
+     * used to be filtered out of the results and offered to nothing, so those
+     * seconds of speech reached no transcriber at all and the only record of them
+     * was a `coveredMs` no query reads. Same audio, same refusal, same answer —
+     * except that here only the refused span is re-decoded, and the pieces the
+     * server did return are kept.
+     *
+     * Two different things arrive as "no text", and they part company over the WAV:
+     * a piece the server *refused* is finished with, while a piece it kept losing is
+     * still owed a real transcript. See [CloudTranscriber.PieceResult.retryable].
+     */
+    private suspend fun fromCloud(
+        chunk: ChunkEntity,
+        cfg: Settings,
+        outcome: CloudTranscriber.CloudOutcome.Settled,
+        audio: FloatArray,
+        voicedMs: Long,
+    ): Attempt.Text {
+        val kept = outcome.pieces.filterNot { it.rejected }
+        val refused = outcome.pieces.filter { it.rejected }
+
+        val spoken = kept.filter { it.text.isNotBlank() }.map {
+            Spoken(
+                startMs = it.offsetMs,
+                endMs = it.offsetMs + it.durationMs,
+                text = it.text.trim(),
+                language = it.language,
+            )
+        }.toMutableList()
+        var coveredMs = kept.sumOf { it.durationMs }
+        var elapsedMs = outcome.elapsedMs
+        var covered = 0
+
+        for (piece in refused) {
+            Log.w(
+                TAG,
+                "chunk ${chunk.id}: no server text for the piece at ${piece.offsetMs / 1000}s " +
+                    if (piece.retryable) "(the server kept losing it); covering it on device for now"
+                    else "(the server refused it); covering it on device",
+            )
+            if (!engine.isLoaded) continue
+            val slice = sliceOf(audio, piece.offsetMs, piece.durationMs)
+            if (slice.isEmpty()) continue
+            val attempt = engine.transcribe(slice, cfg.language.code)
+            val ok = attempt.getOrNull()
+            if (ok == null) {
+                Log.w(
+                    TAG,
+                    "chunk ${chunk.id}: on-device engine could not cover the refused piece",
+                    attempt.exceptionOrNull(),
+                )
+                continue
+            }
+            // Whisper's timestamps are relative to the slice it was handed.
+            spoken += ok.segments.map {
+                Spoken(piece.offsetMs + it.startMs, piece.offsetMs + it.endMs, it.text, ok.language)
+            }
+            coveredMs += piece.durationMs
+            elapsedMs += ok.elapsedMs
+            covered++
+        }
+
+        return Attempt.Text(
+            spoken = spoken.sortedBy { it.startMs },
+            source = if (covered > 0) TranscriptSource.MIXED else TranscriptSource.CLOUD,
+            coveredMs = coveredMs.coerceAtMost(voicedMs),
+            elapsedMs = elapsedMs,
+            // Audio the server *refused* is finished with: asking again gets the same
+            // answer, so nothing better is coming and the WAV is not owed. Audio it
+            // kept losing is the opposite — the piece stopped being re-uploaded to
+            // bound the bandwidth, not because anything was decided about the speech
+            // in it — so that span is still owed a real transcript and its audio has
+            // to survive until the server can give one.
+            provisional = refused.any { it.retryable },
+        )
+    }
+
+    /** A span of the compacted voiced stream, addressed the way `cloud_jobs` rows address it. */
+    private fun sliceOf(audio: FloatArray, offsetMs: Long, durationMs: Long): FloatArray {
+        val from = (offsetMs * AudioFormatSpec.SAMPLE_RATE / 1000L).toInt().coerceIn(0, audio.size)
+        val to = (from + durationMs * AudioFormatSpec.SAMPLE_RATE / 1000L).toInt().coerceIn(from, audio.size)
+        return audio.copyOfRange(from, to)
     }
 
     private suspend fun runCloud(
@@ -455,6 +630,55 @@ class TranscriptionPipeline(
 
     // ---- terminal writes -----------------------------------------------------
 
+    /**
+     * The one door every status write goes through, so that "what happens to the
+     * audio" and "what happens to the server work" are answered once per outcome
+     * rather than once per call site.
+     *
+     * @return false if the lease was gone, in which case nothing was written and
+     *   the caller must not touch the audio either.
+     */
+    private suspend fun settle(
+        chunk: ChunkEntity,
+        lease: Long,
+        status: ChunkStatus,
+        attempts: Int,
+        hold: String?,
+        segments: List<SegmentEntity>? = null,
+        error: String? = null,
+        transcribeMs: Long? = null,
+        speechRatio: Float = chunk.speechRatio,
+        wordCount: Int = 0,
+        transcriptSource: String? = null,
+        voicedMs: Long = 0,
+        coveredMs: Long = 0,
+        notBefore: Long = 0,
+    ): Boolean = try {
+        db.transcriptDao().settle(
+            chunkDao = db.chunkDao(),
+            segmentDao = db.segmentDao(),
+            cloudJobDao = db.cloudJobDao(),
+            chunkId = chunk.id,
+            lease = lease,
+            segments = segments,
+            attempts = attempts,
+            error = error,
+            transcribeMs = transcribeMs,
+            speechRatio = speechRatio,
+            wordCount = wordCount,
+            status = status,
+            transcriptSource = transcriptSource,
+            voicedMs = voicedMs,
+            coveredMs = coveredMs,
+            audioHold = hold,
+            notBefore = notBefore,
+        )
+        true
+    } catch (lost: LeaseLostException) {
+        Log.w(TAG, "chunk ${chunk.id}: lease lost before the write landed; discarding it", lost)
+        false
+    }
+
     private suspend fun commitSilent(
         chunk: ChunkEntity,
         lease: Long,
@@ -463,24 +687,20 @@ class TranscriptionPipeline(
         file: File,
         cfg: Settings,
     ): Boolean {
-        db.transcriptDao().commitTranscript(
-            chunkDao = db.chunkDao(),
-            segmentDao = db.segmentDao(),
-            chunkId = chunk.id,
-            lease = lease,
-            segments = emptyList(),
-            attempts = attempts,
-            transcribeMs = 0,
-            speechRatio = speechRatio,
-            wordCount = 0,
-            status = ChunkStatus.SILENT,
-            transcriptSource = null,
-            voicedMs = 0,
-            coveredMs = 0,
-            audioHold = null,
-        )
-        runCatching { db.cloudJobDao().clearForChunk(chunk.id) }
-        if (!cfg.keepAudioAfterTranscription) releaseAudio(chunk.id, file)
+        val hold = holdReason(attempt = null, voicedMs = 0, cfg = cfg)
+        if (settle(
+                chunk = chunk,
+                lease = lease,
+                status = ChunkStatus.SILENT,
+                attempts = attempts,
+                hold = hold,
+                segments = emptyList(),
+                transcribeMs = 0,
+                speechRatio = speechRatio,
+            )
+        ) {
+            releaseAudioIfProven(chunk.id, hold, file)
+        }
         return true
     }
 
@@ -493,7 +713,6 @@ class TranscriptionPipeline(
         speechRatio: Float,
         voicedMs: Long,
         cfg: Settings,
-        underPressure: Boolean,
         file: File,
     ) {
         val segments = attempt.spoken.map {
@@ -508,27 +727,26 @@ class TranscriptionPipeline(
             )
         }
         val words = segments.sumOf { seg -> seg.text.split(WHITESPACE).count { it.isNotBlank() } }
-        val hold = holdReason(attempt, voicedMs, cfg, underPressure)
+        val hold = holdReason(attempt, voicedMs, cfg)
 
-        // Segments and terminal status commit together, conditional on still
-        // holding the lease. Only after this returns is it safe to touch the audio.
-        db.transcriptDao().commitTranscript(
-            chunkDao = db.chunkDao(),
-            segmentDao = db.segmentDao(),
-            chunkId = chunk.id,
+        // Segments, terminal status and the audio decision commit together,
+        // conditional on still holding the lease. Only after this returns is it
+        // safe to act on that decision.
+        val landed = settle(
+            chunk = chunk,
             lease = lease,
-            segments = segments,
+            status = ChunkStatus.DONE,
             attempts = attempts,
+            hold = hold,
+            segments = segments,
             transcribeMs = attempt.elapsedMs,
             speechRatio = speechRatio,
             wordCount = words,
-            status = ChunkStatus.DONE,
             transcriptSource = attempt.source,
             voicedMs = voicedMs,
             coveredMs = attempt.coveredMs,
-            audioHold = hold,
         )
-        runCatching { db.cloudJobDao().clearForChunk(chunk.id) }
+        if (!landed) return
 
         val rtf = if (attempt.elapsedMs > 0) {
             (voicedMs / 1000f) / (attempt.elapsedMs / 1000f)
@@ -540,33 +758,49 @@ class TranscriptionPipeline(
             TAG,
             "chunk ${chunk.id}: ${segments.size} segments, $words words via ${attempt.source}, " +
                 "${attempt.elapsedMs} ms (${"%.1f".format(rtf)}x realtime)" +
-                if (hold != null) " — audio kept: $hold" else "",
+                if (hold != AudioHold.UNLINK_PENDING) " — audio kept: $hold" else "",
         )
 
-        if (hold == null && !cfg.keepAudioAfterTranscription) releaseAudio(chunk.id, file)
+        releaseAudioIfProven(chunk.id, hold, file)
     }
 
     /**
-     * Why this chunk's audio must survive its own transcript, or null to release.
+     * What is keeping this chunk's audio, or [AudioHold.UNLINK_PENDING] to release it.
      *
-     * Storing text is not on its own proof the audio is expendable: a partial
-     * transcript has a hole in it, and a device transcript taken while the server
-     * was unavailable is provisional by construction. Both are re-transcribable
-     * only while the WAV exists, and only findable later because
-     * [com.mandar.echo.data.ChunkEntity.transcriptSource] records which engine wrote it.
+     * Always an answer, never an absence, because this is the value a later sweep
+     * reads back: "no hold" and "no decision has ever been recorded here" have to be
+     * distinguishable, or a startup pass cannot tell a crashed release apart from an
+     * archive the user asked for.
+     *
+     * The order is the point.
+     *
+     * A hole outranks everything: those seconds of speech reached no engine at all,
+     * so the WAV is the only copy of them that exists, and no disk policy makes
+     * deleting it safe. The user's own request comes next — audio kept because Echo
+     * was told to keep it is not Echo's to trade for space, and the disk valve, which
+     * sees only rows, must not be able to reach it. (The cost is that such a chunk is
+     * not listed for redo even when it holds a provisional transcript. Its audio is
+     * intact, which is what was asked for.) Only then the provisional transcript,
+     * which is the one hold [relieveAudioPressure] may spend, because a transcript
+     * of that audio already exists and only its accuracy is at stake.
+     *
+     * Disk pressure deliberately does not appear here. It used to, as the first arm,
+     * which meant a backlog large enough to trip the valve silently deleted audio
+     * containing speech nothing had transcribed.
+     *
+     * @param attempt null for a chunk with no speech in it: there is no transcript,
+     *   so neither the hole nor the provisional arm can apply. Silence goes through
+     *   the same function rather than deciding two of these arms a second time.
      */
     private fun holdReason(
-        attempt: Attempt.Text,
+        attempt: Attempt.Text?,
         voicedMs: Long,
         cfg: Settings,
-        underPressure: Boolean,
-    ): String? = when {
-        underPressure -> null
-        attempt.coveredMs + HOLE_TOLERANCE_MS < voicedMs ->
-            "part of this chunk was never transcribed"
-        attempt.source == TranscriptSource.DEVICE && usesCloud(cfg) ->
-            "transcribed on device while the server was unavailable"
-        else -> null
+    ): String = when {
+        attempt != null && attempt.coveredMs + HOLE_TOLERANCE_MS < voicedMs -> AudioHold.HOLE
+        cfg.keepAudioAfterTranscription -> AudioHold.USER_REQUEST
+        attempt != null && attempt.provisional -> AudioHold.DEGRADED
+        else -> AudioHold.UNLINK_PENDING
     }
 
     private suspend fun failChunk(
@@ -578,28 +812,57 @@ class TranscriptionPipeline(
         voicedMs: Long,
     ) {
         val terminal = attempts >= MAX_ATTEMPTS
-        db.chunkDao().finishChunk(
-            id = chunk.id,
+        settle(
+            chunk = chunk,
             lease = lease,
             // Audio is deliberately kept on FAILED so a bad run stays recoverable.
             status = if (terminal) ChunkStatus.FAILED else ChunkStatus.PENDING,
             attempts = attempts,
+            hold = if (terminal) AudioHold.FAILED else null,
+            // A stored transcript is left alone: this may be a redo of a chunk that
+            // already has one, and a failed redo must not take the old text with it.
+            segments = null,
             error = reason,
-            transcribeMs = null,
             speechRatio = speechRatio,
-            wordCount = 0,
-            transcriptSource = null,
             voicedMs = voicedMs,
-            coveredMs = 0,
-            audioHold = if (terminal) "failed; kept so it can be retried" else null,
+            notBefore = if (terminal) 0 else clock() + FAIL_BACKOFF_MS,
         )
         _state.value = _state.value.copy(lastError = reason)
     }
 
+    /**
+     * Retires a chunk that keeps taking the process down with it.
+     *
+     * FAILED rather than DISCARDED, and with the audio kept: nothing here knows
+     * *why* the runs died — that is the whole reason [ChunkEntity.abandonedClaims]
+     * exists — so the chunk goes behind the same retry button as any other failure
+     * instead of being thrown away. `attempts` is left alone; a claim that recorded
+     * nothing was never an attempt at anything.
+     */
+    private suspend fun retireCrashingChunk(chunk: ChunkEntity, lease: Long) {
+        Log.e(
+            TAG,
+            "chunk ${chunk.id}: ${chunk.abandonedClaims} claims ended without an outcome; " +
+                "retiring it so the queue can move",
+        )
+        settle(
+            chunk = chunk,
+            lease = lease,
+            status = ChunkStatus.FAILED,
+            attempts = chunk.attempts,
+            hold = AudioHold.FAILED,
+            error = "transcribing this repeatedly stopped Echo",
+            voicedMs = chunk.voicedMs,
+        )
+        _state.value = _state.value.copy(lastError = "A chunk kept crashing and was set aside")
+    }
+
     private suspend fun park(chunk: ChunkEntity, reason: String, backoffMs: Long) {
+        val lease = chunk.claimedAt ?: return
         val wait = backoffMs.coerceIn(PARK_SHORT_MS, PARK_LONG_MS)
         db.chunkDao().deferChunk(
             id = chunk.id,
+            lease = lease,
             notBefore = clock() + wait,
             // Never touches `attempts`: a park is not an attempt at anything, and
             // treating a cold server as one is what let three network blips
@@ -633,7 +896,18 @@ class TranscriptionPipeline(
 
     // ---- audio lifecycle -----------------------------------------------------
 
-    private suspend fun releaseAudio(chunkId: Long, file: File) {
+    /**
+     * The single guarded unlink point. Nothing else in Echo deletes a WAV a chunk
+     * row still points at.
+     *
+     * The argument is the row's own recorded [AudioHold] and nothing else — not the
+     * settings, not the backend, not the shape of the row. Every unlink therefore
+     * carries out a decision that was written down at the same instant as the
+     * status it belongs to, which is the only version of this that a sweep running
+     * at startup, with no memory of the run, can also get right.
+     */
+    private suspend fun releaseAudioIfProven(chunkId: Long, hold: String?, file: File) {
+        if (hold != AudioHold.UNLINK_PENDING) return
         if (file.delete() || !file.exists()) {
             db.chunkDao().markAudioDeleted(chunkId)
         } else {
@@ -642,19 +916,82 @@ class TranscriptionPipeline(
     }
 
     /**
-     * Terminal chunks whose audio was cleared for release but is still on disk —
-     * the service was killed between committing the transcript and unlinking the
-     * file. Nothing else ever revisits a terminal chunk, so without this sweep the
-     * WAV stays forever and Echo quietly breaks its own promise to delete it.
+     * Finishes releases that were decided but never carried out — the service was
+     * killed in the window between committing the transcript and unlinking the file.
+     * Nothing else ever revisits a terminal chunk, so without this sweep the WAV
+     * stays forever and Echo quietly breaks its own promise to delete it.
+     *
+     * It resumes a decision; it never makes one. That distinction is the whole
+     * design: this used to select rows with no hold recorded, which is also every
+     * row written before the column existed — including the archive a previous
+     * version was told to keep, deleted in a single pass on first launch.
      */
     private suspend fun releaseLeftoverAudio() {
-        db.chunkDao().releasableLeftovers().forEach { row ->
+        db.chunkDao().releasableLeftovers(AudioHold.UNLINK_PENDING).forEach { row ->
             val f = row.filePath?.let(::File) ?: return@forEach
-            if (!f.exists() || f.delete()) {
-                db.chunkDao().markAudioDeleted(row.id)
-                Log.i(TAG, "released leftover audio for chunk ${row.id}")
-            }
+            releaseAudioIfProven(row.id, AudioHold.UNLINK_PENDING, f)
+            Log.i(TAG, "released leftover audio for chunk ${row.id}")
         }
+    }
+
+    /**
+     * True when Echo's own retained audio is what is squeezing the device, which is
+     * the only condition under which bypassing the good transcriber is better than
+     * waiting for it.
+     *
+     * Two arms, because there are two ways for holding audio to cost more than it is
+     * worth. The absolute cap stops Echo hoarding on a phone with room to spare. The
+     * free-space arm is the one that matters in practice: the recorder pauses on
+     * *free bytes*, so a cap denominated in *held bytes* could only ever open first
+     * on a device with 2 GB free, and every phone below that — the ones the app
+     * explicitly still records on — reached the pause with the valve shut.
+     *
+     * The conjunction on that arm is not a nicety. A phone can sit near its limit
+     * because of everything else installed on it; releasing a hoard too small to lift
+     * the recorder's pause spends audio and buys nothing, and the honest answer there
+     * is the low-storage notice, not a worse transcript.
+     */
+    private suspend fun underAudioPressure(): Boolean {
+        val retained = db.chunkDao().retainedAudioBytes(AudioHold.UNLINK_PENDING)
+        if (retained > MAX_RETAINED_BYTES) return true
+        if (retained < DiskSpace.RELIEVABLE_BYTES) return false
+        return DiskSpace.freeBytes(appContext) < DiskSpace.PRESSURE_FREE_BYTES
+    }
+
+    /**
+     * Spends held audio, oldest first, until the device is no longer squeezed.
+     *
+     * The other half of the escape valve, and deliberately a separate act from
+     * transcribing. Deciding at commit time — "this chunk is being written under
+     * pressure, so release its audio" — sacrifices whichever chunk happens to be in
+     * hand, including one whose speech no engine ever saw. Here the choice is made
+     * across the whole archive, over exactly one recorded reason
+     * ([AudioHold.DEGRADED]): a transcript of that audio exists, so what is lost is
+     * accuracy that the user can already see recorded as such, and what is bought is
+     * the recorder staying alive. A hole and a copy the user asked for are out of
+     * reach at any pressure; if those are all that is left, Echo stops releasing and
+     * the recorder pauses with a notice, which is the outcome that can be undone.
+     */
+    private suspend fun relieveAudioPressure() {
+        if (!underAudioPressure()) return
+        val candidates = db.chunkDao().tradeableAudio(AudioHold.DEGRADED)
+        if (candidates.isEmpty()) return
+
+        var released = 0
+        for (row in candidates) {
+            val f = row.filePath?.let(::File) ?: continue
+            if (f.delete() || !f.exists()) {
+                db.chunkDao().markAudioDeleted(row.id)
+                released++
+                Log.w(
+                    TAG,
+                    "released audio for chunk ${row.id} to stay under the retention cap; " +
+                        "its transcript is the on-device one",
+                )
+            }
+            if (!underAudioPressure()) break
+        }
+        if (released > 0) Log.w(TAG, "released $released chunk(s) of held audio under storage pressure")
     }
 
     /**
@@ -718,13 +1055,18 @@ class TranscriptionPipeline(
             CloudTranscriber.supports(cfg.language.code)
 
     private fun cloudFor(cfg: Settings): CloudTranscriber {
-        val identity = cfg.sttServerUrl + " " + cfg.sttApiKey
-        cloud?.let { if (cloudIdentity == identity) return it }
+        // Compared as two fields rather than as one joined string. Any separator is
+        // a character that could legitimately appear in a key, and the one that
+        // provably cannot -- a NUL -- makes this source file read as binary, so
+        // every grep over the repo silently skips the pipeline.
+        val same = cloudUrl == cfg.sttServerUrl && cloudKey == cfg.sttApiKey
+        cloud?.let { if (same) return it }
         // The settings that could have caused a halt just changed, so whatever was
         // wrong may well be fixed. Without this the cloud path stays dead until the
         // process restarts, however many times the user corrects the key.
-        if (cloudIdentity != null) gate.clearHalt()
-        cloudIdentity = identity
+        if (cloudUrl != null) gate.clearHalt()
+        cloudUrl = cfg.sttServerUrl
+        cloudKey = cfg.sttApiKey
         return CloudTranscriber(cfg.sttServerUrl, cfg.sttApiKey, db.cloudJobDao())
             .also { cloud = it }
     }

@@ -94,7 +94,16 @@ class CloudTranscriber internal constructor(
 
         const val POLL_CEILING_FLOOR_MS = 5 * 60_000L
 
-        /** Consecutive resubmits after a JobGone before a piece stops re-uploading and parks. */
+        /**
+         * Re-uploads of one piece after the server has lost its job, before the piece
+         * gives up and goes [CloudJobState.LOST].
+         *
+         * Counted as an ordinal: `resubmits` on a NEW row is the number of the
+         * resubmit about to happen, so a piece is uploaded at most `1 + MAX` times
+         * per plan. The bound is bandwidth. A piece is 3.8 MB of WAV on a metered
+         * radio, and a park costs twelve seconds, so a bound that is documented but
+         * unreachable is not a bound — it is an unmetered upload loop.
+         */
         const val MAX_CONSECUTIVE_RESUBMITS = 2
 
         /**
@@ -133,11 +142,34 @@ class CloudTranscriber internal constructor(
          * the chunk was parked must not relabel text the server already returned.
          */
         val language: String,
+        /**
+         * The server returned no text for this span, so the caller must cover it.
+         *
+         * Derived from "not COMPLETED" rather than "is REJECTED", because there is
+         * more than one way for a piece to end without text and the caller's job —
+         * transcribe this span with something — is the same for all of them. Only
+         * reached once every row is terminal, which `run` checks before mapping.
+         */
         val rejected: Boolean,
+        /**
+         * The refusal was about the server, not about the audio, so a better
+         * transcript of this span is still plausibly available.
+         *
+         * The caller reads this to decide whether the WAV is still owed something. A
+         * piece the server understood and refused is finished with; a piece it kept
+         * losing is not, and treating the two alike deletes the only copy of audio
+         * that IndicConformer would have transcribed perfectly an hour later.
+         */
+        val retryable: Boolean,
     )
 
     sealed interface CloudOutcome {
-        /** Every piece reached a terminal state. Some may be [PieceResult.rejected]. */
+        /**
+         * Every piece reached a terminal state. Some may be [PieceResult.rejected],
+         * and those the caller covers with the on-device engine: a piece the server
+         * refused is in exactly the position a whole chunk it refused is in, and
+         * dropping it instead left that span of speech transcribed by nothing.
+         */
         data class Settled(val pieces: List<PieceResult>, val elapsedMs: Long) : CloudOutcome
 
         /**
@@ -184,7 +216,7 @@ class CloudTranscriber internal constructor(
         var progressed = false
 
         for (row in rows) {
-            if (row.state == CloudJobState.COMPLETED || row.state == CloudJobState.REJECTED) continue
+            if (row.state.isTerminal) continue
 
             // One outstanding job at a time. The server is strictly serial -- one
             // batch worker behind a global inference lock -- so a second job cannot
@@ -212,19 +244,11 @@ class CloudTranscriber internal constructor(
         }
 
         val finished = jobs.forChunk(chunkId)
-        if (finished.any { it.state != CloudJobState.COMPLETED && it.state != CloudJobState.REJECTED }) {
+        if (finished.any { !it.state.isTerminal }) {
             return CloudOutcome.Park("pieces still outstanding", progressed = progressed, offline = false)
         }
         return CloudOutcome.Settled(finished.map(::toResult), clock() - started)
     }
-
-    /** Pieces already finished, so a fallback can keep them instead of re-decoding the chunk. */
-    suspend fun completedPieces(chunkId: Long, fingerprint: Long): List<PieceResult> =
-        jobs.forChunk(chunkId)
-            .filter { it.streamFingerprint == fingerprint && it.state == CloudJobState.COMPLETED }
-            .map(::toResult)
-
-    suspend fun forget(chunkId: Long) = jobs.clearForChunk(chunkId)
 
     // ---- the piece state machine -------------------------------------------
 
@@ -238,9 +262,12 @@ class CloudTranscriber internal constructor(
     /**
      * NEW ─submit─► SUBMITTED ─poll─► COMPLETED | REJECTED
      *   ▲                │
-     *   └── JobGone ─────┘        (bounded resubmits; the instance died or the TTL expired)
+     *   └── JobGone ─────┤        (the instance died or the TTL expired)
+     *                    │
+     *                    └──────► LOST   once the resubmit budget is spent
      *
-     * Terminal states are COMPLETED (text, possibly "") and REJECTED. Nothing else.
+     * Terminal states are COMPLETED (text, possibly ""), REJECTED and LOST. Nothing
+     * else, and every loop back to NEW costs one of a bounded number of re-uploads.
      */
     private suspend fun advance(row: CloudJobEntity, voiced: FloatArray): Step {
         var current = row
@@ -268,15 +295,16 @@ class CloudTranscriber internal constructor(
         return when (val outcome = interpretSubmit(reply.code, reply.body)) {
             is SubmitOutcome.Accepted -> {
                 jobs.upsert(
+                    // `resubmits` is deliberately carried over rather than zeroed. An
+                    // accepted upload proves only that some instance took the bytes;
+                    // it says nothing about whether the job will still exist at the
+                    // first poll, which is the only question the counter asks. Zeroing
+                    // here meant every run re-read its own submit and saw 0, so the
+                    // bound below could never be reached — see MAX_CONSECUTIVE_RESUBMITS.
                     row.copy(
                         jobId = outcome.jobId,
                         state = CloudJobState.SUBMITTED,
                         submittedAt = clock(),
-                        // Measures *consecutive* futile resubmits, not lifetime ones.
-                        // A full round trip is proof the previous cycle worked, and a
-                        // lifetime cap silently retires chunks on a service that
-                        // legitimately recycles instances several times an hour.
-                        resubmits = 0,
                     )
                 )
                 Step.Done
@@ -294,8 +322,9 @@ class CloudTranscriber internal constructor(
     }
 
     private suspend fun pollToTerminal(row: CloudJobEntity): Step {
-        val jobId = row.jobId ?: return Step.Park("submitted with no job id", progressed = false)
-        val pieceSeconds = row.durationMs / 1000.0
+        var current = row
+        val jobId = current.jobId ?: return Step.Park("submitted with no job id", progressed = false)
+        val pieceSeconds = current.durationMs / 1000.0
         val ceiling = maxOf(POLL_CEILING_FLOOR_MS, (pieceSeconds * POLL_CEILING_FACTOR * 1000).toLong())
         val deadline = clock() + ceiling
 
@@ -305,14 +334,29 @@ class CloudTranscriber internal constructor(
         while (true) {
             delay(jitter(wait))
             val reply = transport.get("/batch/status/$jobId", POLL_STALL_MS)
+            val outcome = interpretPoll(reply.code, reply.body)
 
-            when (val outcome = interpretPoll(reply.code, reply.body)) {
+            // Deliberately no reset of `resubmits` here.
+            //
+            // An earlier fix zeroed the streak on any poll the server answered
+            // about this job id, which reads as reasonable and is not: queued and
+            // processing are answers, and the documented Cloud Run failure mode is
+            // exactly "answered, then gone" — an instance with no in-flight request
+            // is a scale-in candidate and `_batch_jobs` has no persistence. So
+            // queued -> reset -> 404 -> resubmit is a cycle, and the budget below
+            // is never reached. One 3.8 MB upload per minute, forever, on a metered
+            // radio. The budget is per *plan*, and it needs no within-plan reset,
+            // because `TranscriptDao.settle` clears this chunk's rows on any
+            // terminal status and a user redo replans from scratch. The redo is the
+            // reset, at the one granularity where granting more bandwidth is a
+            // decision somebody made rather than one a flaky server can extract.
+            when (outcome) {
                 is PollOutcome.Completed -> {
-                    jobs.upsert(row.copy(state = CloudJobState.COMPLETED, transcript = outcome.transcript))
+                    jobs.upsert(current.copy(state = CloudJobState.COMPLETED, transcript = outcome.transcript))
                     val words = outcome.transcript.trim()
                     Log.i(
                         TAG,
-                        "chunk ${row.chunkId} piece ${row.pieceIndex}: " +
+                        "chunk ${current.chunkId} piece ${current.pieceIndex}: " +
                             if (words.isEmpty())
                                 "server returned no words for ${"%.0f".format(pieceSeconds)} s of voiced audio"
                             else "${words.length} chars",
@@ -320,17 +364,32 @@ class CloudTranscriber internal constructor(
                     return Step.Done
                 }
 
+                // LOST, not REJECTED. REJECTED means "the server read this audio and
+                // refused it", which is a fact about the audio and is final. Neither
+                // of these is that. The server's batch worker fails under a blanket
+                // `except Exception`, so a transient torch allocation error arrives
+                // here identical to a real refusal; and a body we cannot parse means
+                // the server changed under us, which says nothing about the audio at
+                // all. Filing either as REJECTED made the piece non-retryable, so the
+                // span was covered by Whisper, coveredMs reached voicedMs, no hold
+                // fired, and the only copy of that speech was deleted — on a Marathi
+                // day, deleted in exchange for a transcript measured at 0.00 recall.
                 is PollOutcome.Failed -> {
-                    jobs.upsert(row.copy(state = CloudJobState.REJECTED, error = outcome.reason))
+                    jobs.upsert(current.copy(state = CloudJobState.LOST, error = outcome.reason))
                     return Step.Done
                 }
 
                 is PollOutcome.Malformed -> {
-                    jobs.upsert(row.copy(state = CloudJobState.REJECTED, error = "unrecognised server reply"))
+                    jobs.upsert(
+                        current.copy(
+                            state = CloudJobState.LOST,
+                            error = "server sent a reply this version does not understand",
+                        )
+                    )
                     return Step.Done
                 }
 
-                is PollOutcome.JobGone -> return resubmitAfterLoss(row, ceiling)
+                is PollOutcome.JobGone -> return resubmitAfterLoss(current)
 
                 is PollOutcome.Unauthorized -> return Step.Halt(outcome.reason)
 
@@ -355,7 +414,16 @@ class CloudTranscriber internal constructor(
         }
     }
 
-    private suspend fun resubmitAfterLoss(row: CloudJobEntity, ceiling: Long): Step {
+    /**
+     * The only place a lost job is decided about, which is what makes the bound real.
+     *
+     * A row left NEW here is a promise to upload again, so the budget has to be spent
+     * *here* rather than checked again at the upload: the previous version wrote
+     * `state = NEW` on exhaustion too, so the very next run re-uploaded exactly the
+     * piece the counter had just given up on. The invariant this keeps instead is
+     * that a NEW row always has budget left, and a piece out of budget is terminal.
+     */
+    private suspend fun resubmitAfterLoss(row: CloudJobEntity): Step {
         val age = clock() - row.submittedAt
         // The server evicts a finished job an hour after completion. A 404 on a
         // young job is a lost instance; on an old one it is our own scheduling,
@@ -363,14 +431,30 @@ class CloudTranscriber internal constructor(
         if (age > 3_600_000L) {
             Log.w(TAG, "chunk ${row.chunkId} piece ${row.pieceIndex}: job expired after ${age / 60_000} min")
         } else {
-            Log.i(TAG, "chunk ${row.chunkId} piece ${row.pieceIndex}: server lost the job; resubmitting")
+            Log.i(TAG, "chunk ${row.chunkId} piece ${row.pieceIndex}: server lost the job")
         }
 
-        if (row.resubmits >= MAX_CONSECUTIVE_RESUBMITS) {
-            jobs.upsert(row.copy(state = CloudJobState.NEW, jobId = null))
-            return Step.Park("server keeps losing the job", progressed = false)
+        val attempt = row.resubmits + 1
+        if (attempt > MAX_CONSECUTIVE_RESUBMITS) {
+            // Terminal, so the chunk can settle instead of parking on a server that
+            // has proved it cannot hand this job back. The caller covers the span on
+            // device and keeps the WAV, because nothing here was decided about the
+            // audio -- see CloudJobState.LOST.
+            Log.w(
+                TAG,
+                "chunk ${row.chunkId} piece ${row.pieceIndex}: " +
+                    "server lost the job $MAX_CONSECUTIVE_RESUBMITS times running; not uploading it again",
+            )
+            jobs.upsert(
+                row.copy(
+                    state = CloudJobState.LOST,
+                    jobId = null,
+                    error = "the server lost this job $MAX_CONSECUTIVE_RESUBMITS times running",
+                )
+            )
+            return Step.Done
         }
-        jobs.upsert(row.copy(state = CloudJobState.NEW, jobId = null, resubmits = row.resubmits + 1))
+        jobs.upsert(row.copy(state = CloudJobState.NEW, jobId = null, resubmits = attempt))
         return Step.Park("resubmitting after the server lost the job", progressed = false)
     }
 
@@ -426,7 +510,8 @@ class CloudTranscriber internal constructor(
         durationMs = row.durationMs,
         text = row.transcript.orEmpty(),
         language = if (row.languageSent.startsWith("mr")) "mr" else "hi",
-        rejected = row.state == CloudJobState.REJECTED,
+        rejected = row.state != CloudJobState.COMPLETED,
+        retryable = row.state == CloudJobState.LOST,
     )
 
     private suspend fun awaken(): HealthOutcome {

@@ -176,6 +176,17 @@ internal sealed interface PollOutcome : Transientable {
     }
 }
 
+// There was a `PollOutcome.namesTheJob` classifier here, used to clear a piece's
+// consecutive-loss count whenever the server answered about the job. It was deleted
+// rather than narrowed. The premise — an answered poll proves the upload survived to
+// be worked on — is true and useless: the server can answer `queued` and then lose
+// the job to a scale-in a second later, which is the documented behaviour of a
+// --min-instances=0 service holding jobs in an in-process dict. So the reset it
+// granted was reachable in a loop with the loss it was meant to bound, and the
+// upload budget could never be spent. The budget is per *plan* now; the plan
+// boundary (a terminal status clears `cloud_jobs`, a user redo replans) is the only
+// place that hands out more bandwidth.
+
 /**
  * Whether a `/health` response proves we are talking to vexyl-stt rather than to
  * whatever intercepted the connection.

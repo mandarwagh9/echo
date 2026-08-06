@@ -65,16 +65,30 @@ abstract class ChunkDao {
      * `attempts` is deliberately untouched. A park is not an attempt at anything —
      * treating a cold server or a tunnel as a failed attempt is what let three
      * network blips permanently downgrade a chunk to the on-device engine.
+     *
+     * [ChunkEntity.abandonedClaims] *is* cleared: reaching a park means the run got
+     * far enough to record an outcome, which is exactly what that counter says did
+     * not happen. It counts consecutive silent deaths, not lifetime ones.
+     *
+     * Conditional on the lease like every other write that ends a run. Without it a
+     * worker whose chunk was requeued — or which was cancelled after committing —
+     * could drag a chunk somebody else has already settled back to PENDING.
      */
     @Query(
         """
         UPDATE chunks
         SET status = 'PENDING', claimedAt = NULL, notBefore = :notBefore,
-            transientFailures = :transientFailures, error = :error
-        WHERE id = :id
+            abandonedClaims = 0, transientFailures = :transientFailures, error = :error
+        WHERE id = :id AND claimedAt = :lease
         """
     )
-    abstract suspend fun deferChunk(id: Long, notBefore: Long, transientFailures: Int, error: String?)
+    abstract suspend fun deferChunk(
+        id: Long,
+        lease: Long,
+        notBefore: Long,
+        transientFailures: Int,
+        error: String?,
+    ): Int
 
     /**
      * Recovers leases that are provably abandoned: nobody can still be holding a
@@ -140,32 +154,71 @@ abstract class ChunkDao {
     abstract suspend fun discardFailedWithoutAudio(): Int
 
     /**
-     * Chunks transcribed by the fallback engine whose audio was kept, so they can be
-     * redone against the good model once the server is reachable again. Without
-     * [ChunkEntity.transcriptSource] there was no query that could find them.
+     * Chunks the run itself marked as re-transcribable, so they can be redone
+     * against the good model once the server is reachable again.
+     *
+     * Keyed on the recorded *reasons* ([AudioHold.REDOABLE]), not on
+     * `audioHold IS NOT NULL AND transcriptSource = 'device'`. That conjunction was
+     * a proxy for the reason, and it was about to start matching things it does not
+     * mean: an on-device chunk whose audio is only on disk because the user asked
+     * for it would have been requeued forever to be re-transcribed by the identical
+     * engine that already transcribed it.
      */
     @Query(
         """
         UPDATE chunks
-        SET status = 'PENDING', attempts = 0, transientFailures = 0, notBefore = 0,
-            claimedAt = NULL, error = NULL
-        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL
-          AND audioHold IS NOT NULL AND transcriptSource = 'device'
+        SET status = 'PENDING', attempts = 0, abandonedClaims = 0, transientFailures = 0,
+            notBefore = 0, claimedAt = NULL, error = NULL
+        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL AND audioHold IN (:holds)
         """
     )
-    abstract suspend fun requeueDegraded(): Int
+    abstract suspend fun requeueRedoable(holds: List<String>): Int
 
     @Query(
         """
         SELECT COUNT(*) FROM chunks
-        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL
-          AND audioHold IS NOT NULL AND transcriptSource = 'device'
+        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL AND audioHold IN (:holds)
         """
     )
-    abstract fun degradedCount(): Flow<Int>
+    abstract fun redoableCount(holds: List<String>): Flow<Int>
+
+    /**
+     * Audio the disk valve may trade for space, oldest first.
+     *
+     * Deliberately narrow: one recorded hold ([AudioHold.DEGRADED]), which is the
+     * only one that means "a transcript of this already exists and only its accuracy
+     * is at stake". [AudioHold.HOLE] and [AudioHold.USER_REQUEST] are not in reach
+     * of this query at any pressure, because releasing them destroys speech that was
+     * never transcribed, or a copy the user asked Echo to keep. Oldest first so a
+     * long outage sacrifices the audio the user is least likely to still want.
+     *
+     * `wordCount > 0` is what makes that premise true rather than merely stated. A
+     * DEGRADED row is by definition Whisper's work, and Whisper is measured at 0.00
+     * word recall on Marathi — so on the language this app exists for, the typical
+     * DEGRADED row holds no words at all. Trading its WAV away is not sacrificing
+     * accuracy, it is deleting the recording and keeping an empty string. A chunk
+     * with no words is worth exactly as much as its audio, so it stays.
+     */
+    @Query(
+        """
+        SELECT * FROM chunks
+        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL AND audioHold = :hold
+          AND wordCount > 0
+        ORDER BY startedAt ASC
+        """
+    )
+    abstract suspend fun tradeableAudio(hold: String): List<ChunkEntity>
 
     /**
      * Terminal writes are conditional on still holding the lease.
+     *
+     * Not called directly: it is one statement of [TranscriptDao.settle], which is
+     * where the writes that must land together are grouped.
+     *
+     * [notBefore] matters only on the one write that is not terminal — a failure
+     * with attempts left. Zeroing it there let all three attempts burn back to back
+     * in under a second, so a fault that would have cleared in half a minute
+     * consumed the whole budget and the chunk landed in FAILED.
      *
      * @return rows updated: 0 means the chunk was requeued underneath this worker
      *   and its result must be discarded rather than committed twice.
@@ -176,7 +229,7 @@ abstract class ChunkDao {
         SET status = :status, attempts = :attempts, error = :error,
             transcribeMs = :transcribeMs, speechRatio = :speechRatio, wordCount = :wordCount,
             transcriptSource = :transcriptSource, voicedMs = :voicedMs, coveredMs = :coveredMs,
-            audioHold = :audioHold, claimedAt = NULL, notBefore = 0
+            audioHold = :audioHold, claimedAt = NULL, notBefore = :notBefore, abandonedClaims = 0
         WHERE id = :id AND claimedAt = :lease
         """
     )
@@ -193,28 +246,36 @@ abstract class ChunkDao {
         voicedMs: Long,
         coveredMs: Long,
         audioHold: String?,
+        notBefore: Long,
     ): Int
 
     @Query("UPDATE chunks SET status = :status WHERE id = :id")
     abstract suspend fun setStatus(id: Long, status: ChunkStatus)
 
-    @Query("UPDATE chunks SET filePath = NULL, audioDeleted = 1 WHERE id = :id")
+    /** Clears [ChunkEntity.audioHold] with the file: nothing can still be keeping audio that is gone. */
+    @Query("UPDATE chunks SET filePath = NULL, audioDeleted = 1, audioHold = NULL WHERE id = :id")
     abstract suspend fun markAudioDeleted(id: Long)
 
     /**
-     * Terminal chunks whose audio was cleared for release but is somehow still on
-     * disk — the service was killed in the window between committing the transcript
-     * and unlinking the file. Nothing else ever revisits a terminal chunk, so
-     * without this sweep the WAV stays forever and Echo quietly breaks its own
-     * promise to delete the audio.
+     * Terminal chunks the committing run marked [AudioHold.UNLINK_PENDING] whose
+     * file is somehow still on disk — the service was killed in the window between
+     * committing the transcript and unlinking. Nothing else ever revisits a terminal
+     * chunk, so without this sweep the WAV stays forever and Echo quietly breaks its
+     * own promise to delete the audio.
+     *
+     * Matches the marker rather than `audioHold IS NULL`. Absence of a hold is not
+     * evidence of a release decision: every row written before this column existed
+     * has NULL there too, and those are exactly the WAVs an earlier version was
+     * asked to keep. The sweep is only allowed to finish a job it can see was
+     * started.
      */
     @Query(
         """
         SELECT * FROM chunks
-        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL AND audioHold IS NULL
+        WHERE status IN ('DONE','SILENT') AND filePath IS NOT NULL AND audioHold = :hold
         """
     )
-    abstract suspend fun releasableLeftovers(): List<ChunkEntity>
+    abstract suspend fun releasableLeftovers(hold: String): List<ChunkEntity>
 
     @Query("SELECT * FROM chunks WHERE startedAt BETWEEN :from AND :to ORDER BY startedAt ASC")
     abstract suspend fun chunksBetween(from: Long, to: Long): List<ChunkEntity>
@@ -235,13 +296,27 @@ abstract class ChunkDao {
     abstract suspend fun chunksWithAudio(): List<ChunkEntity>
 
     /**
-     * Bytes of WAV Echo is holding back from deletion, computed from the sample
+     * Bytes of WAV Echo is *holding back* from deletion, computed from the sample
      * count rather than by stat-ing the disk. Feeds the backlog escape valve: a
      * park-don't-fall-back policy releases no audio at all, so without a cap the
      * recorder's own low-space pause would never lift.
+     *
+     * Counts only rows that reached a terminal status still holding their audio.
+     * Summing every row with a filePath conflated two different things: audio kept
+     * *by a decision*, which the valve can trade, and the ordinary PENDING backlog
+     * of a server outage, which it cannot — that audio has no transcript at all.
+     * Because backlog is exactly what grows during an outage, the wrong sum crossed
+     * the cap on pure queue depth (~52 chunks, under nine hours) and then opened a
+     * valve that could do nothing about it, permanently routing every new chunk past
+     * the good engine for the rest of the outage.
      */
-    @Query("SELECT COALESCE(SUM(sampleCount * 2 + 44), 0) FROM chunks WHERE filePath IS NOT NULL")
-    abstract suspend fun retainedAudioBytes(): Long
+    @Query(
+        """
+        SELECT COALESCE(SUM(sampleCount * 2 + 44), 0) FROM chunks
+        WHERE filePath IS NOT NULL AND audioHold IS NOT NULL AND audioHold <> :unlinkPending
+        """
+    )
+    abstract suspend fun retainedAudioBytes(unlinkPending: String): Long
 
     @Query("SELECT COALESCE(SUM(sampleCount),0) FROM chunks WHERE startedAt BETWEEN :from AND :to")
     abstract suspend fun samplesBetween(from: Long, to: Long): Long
@@ -268,8 +343,21 @@ interface CloudJobDao {
      * The server is strictly serial — one batch worker behind a global inference
      * lock — so a second outstanding job cannot start until the first finishes and
      * only makes both look stuck. At most one exists at a time.
+     *
+     * The join is the point. This one row is the gate every other chunk queues
+     * behind, so it must name a chunk somebody will actually come back for: a
+     * SUBMITTED row whose chunk has gone terminal is owed to nobody, and trusting
+     * the row rather than the chunk let one such orphan park the entire cloud path
+     * every twelve seconds for the life of the install.
      */
-    @Query("SELECT chunkId FROM cloud_jobs WHERE state = 'SUBMITTED' LIMIT 1")
+    @Query(
+        """
+        SELECT j.chunkId FROM cloud_jobs j
+        JOIN chunks c ON c.id = j.chunkId
+        WHERE j.state = 'SUBMITTED' AND c.status IN ('PENDING','TRANSCRIBING')
+        LIMIT 1
+        """
+    )
     suspend fun outstandingChunkId(): Long?
 }
 
@@ -322,29 +410,41 @@ interface SummaryDao {
 abstract class TranscriptDao {
 
     /**
-     * Stores a chunk's segments and its terminal status together, or not at all.
+     * Writes everything a finished run owns — its segments, the chunk's new status
+     * and audio decision, and the server work it no longer needs — together, or not
+     * at all. Every status write the pipeline makes goes through here.
      *
-     * @return false if the lease had already been taken away, in which case
-     *   nothing was written. The caller must not delete the audio.
-     *
-     * Two things make this safe that did not used to be. The segments for the
+     * Three things make this safe that did not used to be. The segments for the
      * chunk are cleared first, so a retry, a partially-committed run, or a
      * superseded worker cannot leave the day holding the same speech twice —
      * `insertAll` aborts on conflict, but the primary key is autogenerated, so
-     * there was never a conflict to abort on. And the status write is conditional
+     * there was never a conflict to abort on. The status write is conditional
      * on the lease, so a worker that was requeued underneath (a Whisper run
      * stretched past the watchdog by Doze) rolls the whole thing back instead of
-     * double-committing.
+     * double-committing. And a status nobody will claim again takes the chunk's
+     * `cloud_jobs` rows with it: [CloudJobDao.outstandingChunkId] is the gate every
+     * *other* chunk queues behind, so a SUBMITTED row owed to nobody used to stall
+     * the entire cloud path. Clearing at each terminal call site was the version of
+     * this that had five sites and covered four.
+     *
+     * @param segments null leaves any stored transcript alone. A failed redo of a
+     *   chunk that already had a transcript must not erase the transcript it was
+     *   redoing.
+     *
+     * @throws LeaseLostException if the lease had already been taken away, in which
+     *   case nothing was written and the caller must not touch the audio.
      */
     @Transaction
-    open suspend fun commitTranscript(
+    open suspend fun settle(
         chunkDao: ChunkDao,
         segmentDao: SegmentDao,
+        cloudJobDao: CloudJobDao,
         chunkId: Long,
         lease: Long,
-        segments: List<SegmentEntity>,
+        segments: List<SegmentEntity>?,
         attempts: Int,
-        transcribeMs: Long,
+        error: String?,
+        transcribeMs: Long?,
         speechRatio: Float,
         wordCount: Int,
         status: ChunkStatus,
@@ -352,15 +452,18 @@ abstract class TranscriptDao {
         voicedMs: Long,
         coveredMs: Long,
         audioHold: String?,
-    ): Boolean {
-        segmentDao.deleteForChunk(chunkId)
-        if (segments.isNotEmpty()) segmentDao.insertAll(segments)
+        notBefore: Long,
+    ) {
+        if (segments != null) {
+            segmentDao.deleteForChunk(chunkId)
+            if (segments.isNotEmpty()) segmentDao.insertAll(segments)
+        }
         val updated = chunkDao.finishChunk(
             id = chunkId,
             lease = lease,
             status = status,
             attempts = attempts,
-            error = null,
+            error = error,
             transcribeMs = transcribeMs,
             speechRatio = speechRatio,
             wordCount = wordCount,
@@ -368,14 +471,15 @@ abstract class TranscriptDao {
             voicedMs = voicedMs,
             coveredMs = coveredMs,
             audioHold = audioHold,
+            notBefore = notBefore,
         )
         // Rolls back the segment writes too: a lost lease means another worker owns
         // this chunk and ours is the copy that must disappear.
         if (updated == 0) throw LeaseLostException(chunkId)
-        return true
+        if (status.isTerminal) cloudJobDao.clearForChunk(chunkId)
     }
 }
 
-/** Thrown inside [TranscriptDao.commitTranscript] purely to roll the transaction back. */
+/** Thrown inside [TranscriptDao.settle] purely to roll the transaction back. */
 class LeaseLostException(chunkId: Long) :
     IllegalStateException("chunk $chunkId was requeued while it was being transcribed")

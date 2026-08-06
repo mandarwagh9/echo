@@ -9,7 +9,6 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.StatFs
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.mandar.echo.EchoApp
@@ -28,10 +27,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 private const val TAG = "RecordingService"
-
-/** Pause below this much free space; resume above [RESUME_FREE_BYTES]. */
-private const val MIN_FREE_BYTES = 1_000_000_000L
-private const val RESUME_FREE_BYTES = 1_500_000_000L
 
 /** Warn once the backlog passes roughly two hours of un-transcribed audio. */
 private const val BACKLOG_WARN_CHUNKS = 12
@@ -145,7 +140,7 @@ class RecordingService : Service() {
             return
         }
 
-        if (freeBytes() < MIN_FREE_BYTES) {
+        if (freeBytes() < DiskSpace.MIN_FREE_BYTES) {
             diskPaused = true
             EchoServiceState.setPaused("Storage almost full")
             updateNotification("Paused", "Free up space to resume recording")
@@ -259,7 +254,7 @@ class RecordingService : Service() {
                 EchoServiceState.setFreeBytes(free)
                 chunker?.let { EchoServiceState.setDropped(it.dropped) }
 
-                if (!diskPaused && free < MIN_FREE_BYTES) {
+                if (!diskPaused && free < DiskSpace.MIN_FREE_BYTES) {
                     Log.w(TAG, "pausing: low storage ($free bytes)")
                     diskPaused = true
                     chunker?.stop()
@@ -275,7 +270,7 @@ class RecordingService : Service() {
                             "Echo stopped recording because storage is nearly full.",
                         ),
                     )
-                } else if (diskPaused && free > RESUME_FREE_BYTES) {
+                } else if (diskPaused && free > DiskSpace.RESUME_FREE_BYTES) {
                     Log.i(TAG, "resuming: storage recovered")
                     diskPaused = false
                     if (app.settings.current().recordingEnabled) beginCapture()
@@ -364,6 +359,5 @@ class RecordingService : Service() {
         wakeLock = null
     }
 
-    private fun freeBytes(): Long =
-        runCatching { StatFs(filesDir.absolutePath).availableBytes }.getOrDefault(Long.MAX_VALUE)
+    private fun freeBytes(): Long = DiskSpace.freeBytes(this)
 }

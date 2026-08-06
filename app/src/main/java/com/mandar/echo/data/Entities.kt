@@ -25,10 +25,22 @@ import androidx.room.PrimaryKey
  * the process was never recovered.
  *
  * Audio is unlinked from exactly one place, under one guard — see
- * TranscriptionPipeline.releaseAudioIfProven. Storing a transcript is not on its
- * own sufficient proof that the audio is expendable.
+ * TranscriptionPipeline.releaseAudioIfProven, whose whole argument is the row's
+ * [ChunkEntity.audioHold]. Storing a transcript is not on its own sufficient proof
+ * that the audio is expendable. (TranscriptionPipeline.reconcileOrphanAudio also
+ * deletes files, but only ones no row points at, so it unlinks nothing.)
  */
 enum class ChunkStatus { RECORDING, PENDING, TRANSCRIBING, DONE, SILENT, FAILED, DISCARDED }
+
+/**
+ * No worker will claim this chunk again without the user asking for it.
+ *
+ * The edge everything a run owns has to be settled at: the audio decision, and the
+ * `cloud_jobs` rows, which are the gate every *other* chunk queues behind.
+ */
+val ChunkStatus.isTerminal: Boolean
+    get() = this == ChunkStatus.DONE || this == ChunkStatus.SILENT ||
+        this == ChunkStatus.FAILED || this == ChunkStatus.DISCARDED
 
 /** Which engine produced a chunk's stored transcript. Persisted so a degraded chunk stays findable. */
 object TranscriptSource {
@@ -37,6 +49,59 @@ object TranscriptSource {
 
     /** On-device Whisper: measured 0.23 Hindi and 0.00 Marathi. Provisional whenever the cloud is configured. */
     const val DEVICE = "device"
+
+    /** The server refused part of the chunk and the on-device engine covered that part. */
+    const val MIXED = "mixed"
+}
+
+/**
+ * What is keeping a chunk's WAV on disk, stored in [ChunkEntity.audioHold].
+ *
+ * One column, one question, because a startup sweep can only see rows: it has no
+ * settings, no backend and no memory of what the run that wrote the row decided.
+ * Re-deriving "is this file expendable" from row shape cannot tell "cleared for
+ * release, then the process died" apart from "the user asked to keep this", and
+ * guessing wrong deletes an archive that has no second copy.
+ *
+ * [UNLINK_PENDING] is a true answer to the same question rather than an inversion
+ * of it: the transcript is committed and the delete is all that is left. It is the
+ * only value the leftover sweep acts on, so a row that predates this column — or
+ * any row a future path forgets to mark — is inert rather than fair game.
+ */
+object AudioHold {
+    /** Cleared for release; the unlink has not happened yet. */
+    const val UNLINK_PENDING = "unlink pending"
+
+    /**
+     * The user turned on "keep audio after transcription".
+     *
+     * Outranks [DEGRADED] rather than the other way round, so that the disk valve,
+     * which sees only rows, cannot trade away a copy Echo was told to keep. The
+     * cost is that such a chunk is not offered in the redo list even when a better
+     * transcript is possible; its audio is still there, which is what was asked for.
+     */
+    const val USER_REQUEST = "kept at your request"
+
+    /** Seconds of speech reached no engine at all. The WAV is the only copy of them left. */
+    const val HOLE = "part of this chunk was never transcribed"
+
+    /**
+     * Written by the weaker engine while the better one was configured but
+     * unreachable. The only hold the disk valve may trade away: a transcript
+     * exists, so releasing the audio costs accuracy rather than the recording.
+     */
+    const val DEGRADED = "transcribed on device while the server was unavailable"
+
+    /** Every attempt failed, so the user's retry has something to work with. */
+    const val FAILED = "failed; kept so it can be retried"
+
+    /**
+     * Holds a better transcript could still fix, which is what the user's redo acts
+     * on. [USER_REQUEST] is deliberately absent: it says nothing about the quality
+     * of the transcript, and requeueing every kept chunk would re-transcribe a
+     * finished day with the same engine that already transcribed it.
+     */
+    val REDOABLE = listOf(HOLE, DEGRADED)
 }
 
 @Entity(
@@ -112,16 +177,51 @@ data class ChunkEntity(
     @ColumnInfo(defaultValue = "0") val coveredMs: Long = 0,
 
     /**
-     * Why the audio is being kept despite a terminal status, or null if it is safe
-     * to release. Non-null marks the chunk re-transcribable.
+     * What is still keeping this chunk's WAV on disk, from [AudioHold].
+     *
+     * Written by the run that decided it, inside the same transaction as the status
+     * it belongs to, so a later sweep resumes a decision instead of inventing one.
+     * [AudioHold.UNLINK_PENDING] is the one value that permits a delete; the rest
+     * each name a different reason not to.
+     *
+     * Null is never permission. It means no decision has been recorded here: the
+     * chunk has not settled yet, or the audio is already gone, or the row predates
+     * the column. Reading it as "nothing is holding this, so release it" is exactly
+     * the mistake that deleted a month of deliberately kept WAVs on first launch.
      */
     val audioHold: String? = null,
 ) {
     val durationMs: Long get() = sampleCount * 1000L / 16_000L
 }
 
-/** Where a piece of a chunk's cloud upload has got to. Terminal: COMPLETED, REJECTED. */
-enum class CloudJobState { NEW, SUBMITTED, COMPLETED, REJECTED }
+/** Where a piece of a chunk's cloud upload has got to. */
+enum class CloudJobState {
+    NEW,
+    SUBMITTED,
+
+    /** The server returned text for this piece. It may legitimately be "". */
+    COMPLETED,
+
+    /** The server understood this audio and refused it. Identical bytes get the same answer. */
+    REJECTED,
+
+    /**
+     * The server kept losing the job, so this piece stopped being re-uploaded.
+     *
+     * Distinct from [REJECTED] because the two want opposite answers about the WAV.
+     * A refusal is about the audio and is final; this is about the server — a Cloud
+     * Run instance recycling between the upload and the first poll, or, since
+     * session affinity is cookie-based and HttpURLConnection sends no cookies, a
+     * service scaled past one instance where a poll can *never* find its own job.
+     * Both give the caller no text, so the span is covered on device either way; only
+     * this one leaves a better transcript still owed, which is what keeps the audio.
+     */
+    LOST,
+    ;
+
+    /** No further upload or poll will move this piece. The chunk may settle on it. */
+    val isTerminal: Boolean get() = this == COMPLETED || this == REJECTED || this == LOST
+}
 
 /**
  * One server-sized piece of one chunk's voiced audio, and the job the server is
@@ -171,7 +271,17 @@ data class CloudJobEntity(
     /** Non-null once COMPLETED. May legitimately be "": the model heard no words. */
     val transcript: String? = null,
     val error: String? = null,
-    /** Consecutive resubmits after a JobGone. Reset by any accepted submit. */
+    /**
+     * How many times this piece has been re-uploaded after the server lost the job.
+     *
+     * Reset by a *poll the server answered*, never by the upload. An accepted upload
+     * proves only that some instance took the bytes; it is answered polls that prove
+     * the job survived long enough to be worked on, which is the thing this counter
+     * is asking about. Resetting it on submit is what made
+     * CloudTranscriber.MAX_CONSECUTIVE_RESUBMITS unreachable: every run re-read the
+     * row after its own submit and saw 0, so a server that had permanently lost the
+     * job got the same 3.8 MB piece again on every park, forever, over the radio.
+     */
     val resubmits: Int = 0,
     val submittedAt: Long = 0,
 )

@@ -55,6 +55,7 @@ fun SettingsScreen(vm: EchoViewModel) {
     val download by vm.downloadState.collectAsStateWithLifecycle()
     val free by vm.freeBytes.collectAsStateWithLifecycle()
     val failed by vm.failedChunks.collectAsStateWithLifecycle()
+    val redoable by vm.redoableChunks.collectAsStateWithLifecycle()
 
     var confirmWipe by remember { mutableStateOf(false) }
 
@@ -288,12 +289,27 @@ fun SettingsScreen(vm: EchoViewModel) {
         if (failed.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
             Text(
-                "Their audio was kept so nothing is lost. Retry when a model is installed.",
+                "Their audio was kept so nothing is lost. Retrying puts them back in the queue.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.muted,
             )
             Spacer(Modifier.height(12.dp))
             PillButton("Retry ${failed.size} failed") { vm.retryFailedChunks() }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        SettingRow("Chunks worth redoing", redoable.toString())
+        if (redoable > 0) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Their audio is still here because a better transcript is possible — the " +
+                    "server was unreachable, or part of the chunk was never transcribed. " +
+                    "Redo them once it is back.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.muted,
+            )
+            Spacer(Modifier.height(12.dp))
+            PillButton("Redo $redoable chunks") { vm.redoHeldChunks() }
         }
 
         Group("About")
