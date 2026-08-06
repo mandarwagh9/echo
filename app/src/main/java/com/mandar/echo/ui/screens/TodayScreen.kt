@@ -70,7 +70,19 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
 
     // Keyed on download state too: modelFile does not change when a download
     // finishes, so without it the "install a model" notice would never clear.
-    val hasModel = remember(settings.modelFile, download) { vm.modelsInstalled().isNotEmpty() }
+    // A configured server is a transcriber too. Gating recording on a local model
+    // regardless of backend is what left 11 chunks queued and 0 words written:
+    // capture was blocked here while the pipeline was perfectly able to upload.
+    // Deliberately the same predicate the pipeline uses, including the language
+    // check: with English selected the server is not a transcriber at all (it
+    // coerces unmapped codes to Malayalam, so the client never sends them), and
+    // claiming otherwise here would let recording start with nothing able to run.
+    val usingServer = settings.sttBackend == com.mandar.echo.data.SttBackend.CLOUD &&
+        settings.sttServerUrl.startsWith("http") &&
+        com.mandar.echo.stt.CloudTranscriber.supports(settings.language.code)
+    val hasModel = remember(settings.modelFile, download, usingServer) {
+        usingServer || vm.modelsInstalled().isNotEmpty()
+    }
     val words = remember(segments) {
         segments.sumOf { seg -> seg.text.split(Regex("\\s+")).count { it.isNotBlank() } }
     }
@@ -194,8 +206,22 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
         if (!hasModel) {
             Notice(
                 title = "Install a speech model",
-                body = "Echo transcribes entirely on your phone, so it needs to download a " +
-                    "model once. Nothing is sent anywhere after that.",
+                body = "Echo transcribes on your phone, so it needs to download a model " +
+                    "once. Nothing is sent anywhere after that. Alternatively, point it " +
+                    "at your own transcription server in Settings.",
+                actionLabel = "Open settings",
+                onAction = onOpenSettings,
+            )
+        }
+
+        // Cloud selected with nothing local to fall back on. Recording is allowed
+        // -- audio is kept until it transcribes -- but a tunnel means a backlog,
+        // and that is worth saying before it happens rather than after.
+        if (usingServer && vm.modelsInstalled().isEmpty()) {
+            Notice(
+                title = "No offline fallback",
+                body = "Transcription needs your server. Without a speech model installed, " +
+                    "chunks recorded with no connection queue up until it can be reached.",
                 actionLabel = "Open settings",
                 onAction = onOpenSettings,
             )
@@ -211,6 +237,26 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
 
         pipeline.lastError?.let { error ->
             Notice(title = "Transcription problem", body = error)
+        }
+
+        // A park is a normal state of a recorder that lives on hotel wifi, but an
+        // invisible one is how eighteen chunks queued in silence with nothing on
+        // screen to say so. Shown only while there is actually a backlog waiting.
+        if (!pipeline.busy && pending > 0) {
+            pipeline.waiting?.let { reason ->
+                Spacer(Modifier.height(20.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    SectionLabel("Waiting")
+                    Text(
+                        reason,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.muted,
+                    )
+                }
+            }
         }
 
         // ---- latest speech --------------------------------------------------

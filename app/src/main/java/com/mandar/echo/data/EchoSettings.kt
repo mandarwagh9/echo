@@ -83,8 +83,11 @@ class EchoSettings(private val context: Context) {
             modelFile = p[Keys.MODEL] ?: "ggml-base-q5_1.bin",
             sttBackend = runCatching { SttBackend.valueOf(p[Keys.BACKEND] ?: "") }
                 .getOrDefault(SttBackend.ON_DEVICE),
-            sttServerUrl = (p[Keys.SERVER_URL] ?: "").trim().trimEnd('/'),
-            sttApiKey = p[Keys.API_KEY] ?: "",
+            // Falls back to the build-time default so the server does not have to
+            // be typed into a phone by hand. An explicit setting always wins.
+            sttServerUrl = (p[Keys.SERVER_URL] ?: com.mandar.echo.BuildConfig.STT_URL)
+                .trim().trimEnd('/'),
+            sttApiKey = p[Keys.API_KEY] ?: com.mandar.echo.BuildConfig.STT_KEY,
             language = SttLanguage.fromCode(p[Keys.LANGUAGE] ?: "auto"),
             audioSource = p[Keys.SOURCE] ?: MediaRecorder.AudioSource.MIC,
             summaryHour = p[Keys.HOUR] ?: 23,

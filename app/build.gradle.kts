@@ -1,3 +1,8 @@
+// Imported rather than fully qualified: inside the android {} blocks, Gradle's
+// own `java` extension shadows the java.* package, so `java.util.Properties`
+// fails to resolve.
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,6 +24,22 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Default transcription server, read from local.properties so the shared
+        // secret stays on this machine -- that file is gitignored. Absent values
+        // compile to empty strings, and Echo then simply stays on-device.
+        val localProps = Properties().apply {
+            rootProject.file("local.properties").takeIf { it.exists() }
+                ?.inputStream()?.use { load(it) }
+        }
+        buildConfigField(
+            "String", "STT_URL",
+            "\"${localProps.getProperty("echo.stt.url", "")}\"",
+        )
+        buildConfigField(
+            "String", "STT_KEY",
+            "\"${localProps.getProperty("echo.stt.key", "")}\"",
+        )
 
         ndk {
             // arm64-v8a is the only ABI a real phone needs. x86_64 is here purely
@@ -138,6 +159,14 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("androidx.room:room-testing:$room")
+    // org.json is an Android platform class, so under `isReturnDefaultValues = true`
+    // it resolves to the mockable android.jar where every method returns a default:
+    // JSONObject("...").has(k) would be false and optString(k) would be "" for every
+    // input, and the BatchProtocol table below would pass without parsing anything.
+    // The real implementation is ~70 KB with no dependencies and wins on classpath
+    // order; JsonRealityCheckTest asserts that it did, because a silent regression
+    // here makes the whole suite vacuous.
+    testImplementation("org.json:json:20250107")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
