@@ -81,6 +81,12 @@ gcloud scheduler jobs create http echo-batch-tick \
   2>/dev/null || gcloud scheduler jobs update http echo-batch-tick \
   --project "$PROJECT" --location "$REGION" --schedule "7,22,37,52 * * * *"
 
+# The v2 endpoint, not v1. `apis/run.googleapis.com/v1/namespaces/...:run`
+# silently ignores overrides -- the execution starts with the image's default
+# args and then sits retrying, which looks like a stuck job rather than a
+# rejected request.
+gcloud scheduler jobs create http echo-summarise-nightly   --project "$PROJECT" --location "$REGION"   --schedule "3 23 * * *" --time-zone "Asia/Kolkata"   --uri "https://$REGION-run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/echo-batch:run"   --http-method POST --oauth-service-account-email "$SA"   --message-body '{"overrides":{"containerOverrides":[{"args":["--summarise"]}]}}'   --headers "Content-Type=application/json"   --description "23:03 IST: write up the day from its transcribed segments"   2>/dev/null || true
+
 echo
 echo "Deployed. Upload audio to gs://$INGEST/pending/ and it is transcribed"
 echo "within ~15 minutes plus batch turnaround."

@@ -49,3 +49,11 @@ DIARIZE = os.environ.get("ECHO_DIARIZE", "") == "1"
 
 BATCHES_COLLECTION = "echo_batches"
 SEGMENTS_COLLECTION = "echo_segments"
+
+# The journal's day boundary. Local, not UTC: in IST a UTC day rolls over at
+# 05:30, which would cut every morning in half.
+TIMEZONE = os.environ.get("ECHO_TIMEZONE", "Asia/Kolkata")
+
+# Gemini for the daily write-up. Its own location because Chirp 3 answers from
+# the `us` multi-region and Vertex generative models do not.
+VERTEX_LOCATION = os.environ.get("ECHO_VERTEX_LOCATION", "us-central1")

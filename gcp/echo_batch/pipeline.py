@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from google.api_core.client_options import ClientOptions
 from google.cloud import firestore, storage
@@ -30,6 +32,8 @@ from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 
 from . import config
+
+TZ = ZoneInfo(config.TIMEZONE)
 
 log = logging.getLogger("echo.batch")
 
@@ -156,6 +160,37 @@ def _doc_id(operation_name: str) -> str:
     return operation_name.replace("/", "_")
 
 
+def _chunk_start_ms(uri: str) -> int | None:
+    """The chunk's wall-clock start, carried in the object name.
+
+    The recorder uploads to `pending/<epochMillis>.ogg`, because a transcript
+    with only file-relative offsets cannot be placed on a timeline or grouped
+    into a day -- and the object name is the one piece of metadata that survives
+    every retry, resume and reupload for free.
+
+    Flat, with no date directory. An earlier form was
+    `pending/<YYYY-MM-DD>/<epochMillis>.ogg`, which carries the day twice and
+    lets the two disagree: the day is derived from the epoch, but the
+    completeness check counted unsubmitted recordings by path prefix, so a
+    mismatch made a day look finished while its audio sat in another folder.
+    One source of truth removes the failure instead of guarding it.
+
+    None for anything not following the convention (the eval fixtures), which
+    callers treat as "no wall-clock anchor" rather than "epoch zero".
+    """
+    stem = uri.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return int(stem) if stem.isdigit() else None
+
+
+def _day_of(epoch_ms: int) -> str:
+    """The local day a moment belongs to, as YYYY-MM-DD.
+
+    Local, not UTC: a journal's "day" is the one the person lived, and in IST a
+    UTC day boundary falls at 05:30 -- which would split every morning in two.
+    """
+    return datetime.fromtimestamp(epoch_ms / 1000, TZ).strftime("%Y-%m-%d")
+
+
 def _offset_ms(value: str | None) -> int:
     """Parse the JSON duration form ("0.280s", "3s") into milliseconds."""
     if not value:
@@ -260,9 +295,23 @@ def reap(speech: SpeechClient, bucket: storage.Bucket, db: firestore.Client) -> 
                 log.error("%s: could not read result (%s)", uri, exc)
                 unsettled.append(uri)
                 continue
+            chunk_start = _chunk_start_ms(uri)
             for segment in segments:
+                # Absolute epoch times where the object name gave us an anchor.
+                # Without this a day's segments all sit near zero and sort by
+                # nothing useful.
+                absolute = (
+                    {
+                        "startedAt": chunk_start + segment["startMs"],
+                        "endedAt": chunk_start + segment["endMs"],
+                        "day": _day_of(chunk_start + segment["startMs"]),
+                    }
+                    if chunk_start is not None
+                    else {}
+                )
                 db.collection(config.SEGMENTS_COLLECTION).add({
                     **segment,
+                    **absolute,
                     "sourceUri": uri,
                     "operation": op_name,
                     "createdAt": firestore.SERVER_TIMESTAMP,

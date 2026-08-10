@@ -14,6 +14,7 @@ import logging
 import sys
 
 from .pipeline import run_once
+from .summarise import summarise, today
 
 
 def main() -> int:
@@ -28,6 +29,13 @@ def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # One image, two schedules. `--summarise` is the 23:00 write-up; with no
+    # argument this is the every-15-minutes transcription pass.
+    if "--summarise" in sys.argv:
+        day = next((a for a in sys.argv[1:] if a.startswith("20")), today())
+        summarise(day)
+        return 0
 
     result = run_once()
     logging.getLogger("echo.batch").info(
