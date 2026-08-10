@@ -46,3 +46,29 @@ firestore db "echo"                echo_batches, echo_segments
 
 Both buckets carry a one-day delete rule so audio cannot outlive its purpose
 even if the reaper never runs.
+
+## Deployed
+
+`./deploy.sh` stands the whole thing up and is idempotent. Live now in
+`agentbillboard`:
+
+| | |
+|---|---|
+| Cloud Run job | `echo-batch`, us-central1, 512 Mi, 900 s timeout |
+| Schedule | `echo-batch-tick`, `7,22,37,52 * * * *` Asia/Kolkata |
+| Identity | `echo-batch@` — `speech.client`, `datastore.user`, and `storage.objectAdmin` **per bucket**, not project-wide |
+
+Verified end to end through the deployed job: audio uploaded to
+`pending/` was submitted on one tick, reaped on the next, written to Firestore
+with correct Devanagari and real word-derived timings, and the source audio
+deleted only after the transcript committed.
+
+**Measured latency:** the production `DYNAMIC_BATCHING` tier returned in about
+three minutes on short files. The 24 hours in the pricing tier is a worst-case
+SLA, not the expected wait — but the design must not depend on the fast case,
+because nothing guarantees it.
+
+**Transcripts are never logged.** The server this replaces wrote full transcript
+text to Cloud Logging on every job (`AUDIT-2026-08-06` §F, P1/privacy). The
+Dockerfile still sets `LANG`/`PYTHONIOENCODING` so any Devanagari that does reach
+a log line — an error message, say — survives as text rather than `?`.
