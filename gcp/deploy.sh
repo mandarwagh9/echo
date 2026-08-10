@@ -64,9 +64,13 @@ gcloud run jobs deploy echo-batch \
   --set-env-vars "ECHO_PROJECT=$PROJECT,ECHO_SPEECH_LOCATION=$SPEECH_LOCATION,ECHO_INGEST_BUCKET=$INGEST,ECHO_RESULTS_BUCKET=$RESULTS,ECHO_FIRESTORE_DB=$DB" \
   --max-retries 1 --task-timeout 900s --memory 512Mi
 
+# run.developer, not run.invoker. The nightly summariser passes container args
+# via the v2 :run endpoint, and overrides need run.jobs.runWithOverrides, which
+# invoker does not carry -- Scheduler got a bare 403 until this was granted.
+# Scoped to the job rather than the project.
 gcloud run jobs add-iam-policy-binding echo-batch --region "$REGION" \
   --project "$PROJECT" --member="serviceAccount:$SA" \
-  --role=roles/run.invoker >/dev/null
+  --role=roles/run.developer >/dev/null
 
 echo "== schedule =="
 # Off the :00/:15/:30/:45 marks on purpose -- every cron on the planet lands
@@ -85,7 +89,15 @@ gcloud scheduler jobs create http echo-batch-tick \
 # silently ignores overrides -- the execution starts with the image's default
 # args and then sits retrying, which looks like a stuck job rather than a
 # rejected request.
-gcloud scheduler jobs create http echo-summarise-nightly   --project "$PROJECT" --location "$REGION"   --schedule "3 23 * * *" --time-zone "Asia/Kolkata"   --uri "https://$REGION-run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/echo-batch:run"   --http-method POST --oauth-service-account-email "$SA"   --message-body '{"overrides":{"containerOverrides":[{"args":["--summarise"]}]}}'   --headers "Content-Type=application/json"   --description "23:03 IST: write up the day from its transcribed segments"   2>/dev/null || true
+gcloud scheduler jobs create http echo-summarise-nightly \
+  --project "$PROJECT" --location "$REGION" \
+  --schedule "3 23 * * *" --time-zone "Asia/Kolkata" \
+  --uri "https://$REGION-run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/echo-batch:run" \
+  --http-method POST --oauth-service-account-email "$SA" \
+  --message-body '{"overrides":{"containerOverrides":[{"args":["--summarise"]}]}}' \
+  --headers "Content-Type=application/json" \
+  --description "23:03 IST: write up the day from its transcribed segments" \
+  2>/dev/null || true
 
 echo
 echo "Deployed. Upload audio to gs://$INGEST/pending/ and it is transcribed"
