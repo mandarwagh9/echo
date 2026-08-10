@@ -23,11 +23,27 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Apk = "$PSScriptRoot\..\app\build\outputs\apk\release\app-release.apk",
+    [string]$Apk,
     [int]$WaitSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
+
+# `am start` below deliberately has no `2>&1`. Windows PowerShell 5.1 wraps a
+# native command's redirected stderr in a NativeCommandError record, and under
+# 'Stop' that becomes terminating -- so `am start` printing its harmless
+# "Activity not started, intent has been delivered to currently running top-most
+# instance" (which it does whenever Echo is already open) aborted the script
+# after a perfectly good install.
+
+# Resolved here rather than as a param default: under `powershell -File`,
+# $PSScriptRoot is not reliably populated while the param block is being bound,
+# and the default silently became "\..\app\build\..." -- a relative path that
+# resolves against the caller's working directory and finds nothing.
+if (-not $Apk) {
+    $root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Apk = Join-Path $root "..\app\build\outputs\apk\release\app-release.apk"
+}
 
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { throw "adb not found at $adb" }
@@ -53,13 +69,17 @@ $before = & $adb -s $serial shell dumpsys package com.mandar.echo 2>&1 |
 if ($before) { Write-Host "Installed now:"; $before | ForEach-Object { Write-Host "  $_" } }
 
 Write-Host "`nInstalling $([math]::Round((Get-Item $Apk).Length/1MB,1)) MB (keeping data)..." -ForegroundColor Cyan
-$out = & $adb -s $serial install -r $Apk 2>&1
+$out = & $adb -s $serial install -r $Apk
 $out | ForEach-Object { Write-Host "  $_" }
-if ($out -notmatch 'Success') { throw "install -r failed -- data left untouched." }
+# `$out` is an array of lines, and `-notmatch` on an array returns the elements
+# that do NOT match -- which is non-empty, and therefore truthy, on every
+# successful install (adb also prints "Performing Streamed Install"). Written the
+# obvious way, this threw on success and reported a failure that had not happened.
+if (-not ($out -match 'Success')) { throw "install -r failed -- data left untouched." }
 
 # Clear the log first so the only Room output on screen belongs to this launch.
 & $adb -s $serial logcat -c 2>&1 | Out-Null
-& $adb -s $serial shell am start -n com.mandar.echo/.MainActivity 2>&1 | Out-Null
+& $adb -s $serial shell am start -n com.mandar.echo/.MainActivity | Out-Null
 Start-Sleep -Seconds 6
 
 Write-Host "`n--- database opened? ---" -ForegroundColor Cyan

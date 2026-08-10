@@ -288,7 +288,10 @@ fun SettingsScreen(vm: EchoViewModel) {
         // ---- capture -------------------------------------------------------
 
         Group("Capture")
-        SettingRow("Chunk length", "${settings.chunkMinutes} minutes")
+        SettingRow(
+            "Chunk length",
+            if (settings.chunkMinutes == 1) "1 minute" else "${settings.chunkMinutes} minutes",
+        )
         Spacer(Modifier.height(10.dp))
         ChoiceRow(
             options = listOf("1", "5", "10", "15"),
