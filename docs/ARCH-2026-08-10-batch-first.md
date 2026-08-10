@@ -1,7 +1,13 @@
 # Transcription, redesigned: batch-first, latency-last
 
-**Status:** proposal, with the load-bearing claim measured. Nothing migrated yet.
+**Status:** the server side is built, deployed and verified end to end. The client
+is half built — protocol and upload loop exist and are tested; nothing is wired
+into the recorder. Nothing is migrated, and the measurement that would justify
+migrating has not been made.
 **Constraint:** GCP only. Everything above that is reconsidered from scratch.
+
+> **§9 records where building contradicted this document.** Three of the choices
+> below turned out to be wrong once run. Read §9 before treating §3 as a plan.
 
 ---
 
@@ -152,15 +158,19 @@ is wrong at any chunk size and very wrong at the 1 minute currently configured).
 
 ## 7. Build order
 
-1. ✅ **Measure Chirp 3 on the existing fixtures.** `eval/chirp3_eval.py`. Done — §2.
-2. **Re-measure on real room audio.** The fixture result is necessary, not
-   sufficient. Record far-field Marathi, write the reference by hand, re-run. This
-   is the decision point, not step 1.
-3. Terraform the bucket + Eventarc + Firestore + the three functions.
-4. Client: replace the piece machine with a resumable upload and a Firestore
-   listener. This is where the ~1,500 lines come out.
-5. Cut over one day of audio, both paths in parallel, diff the transcripts.
-6. Retire `vexyl-stt`.
+1. ✅ **Measure Chirp 3 on the existing fixtures.** `eval/chirp3_eval.py` — §2.
+2. ⛔ **Re-measure on real room audio.** *Blocked: needs a recording.* The fixture
+   result is necessary and not sufficient — see §2. **This is the decision point,
+   and nothing past step 4 should happen before it.**
+3. ✅ **Build the server side.** `gcp/` — one scheduled Cloud Run job, the
+   signed-URL minting service, the nightly Gemini write-up. Deployed and verified
+   end to end: uploaded audio is transcribed, written to Firestore under the right
+   local day, and its recording deleted only after the transcript commits.
+4. ✅ **Client, upload half.** `GcsUploadProtocol` + `GcsUploader`, additive and
+   tested against a fake transport. Nothing in the recorder changed.
+5. ⛔ **Client, pipeline half.** *Blocked: needs a decision — see §10.*
+6. Run both paths over the same day and diff the transcripts.
+7. Retire `vexyl-stt`. Only then do the ~1,500 lines come out.
 
 ## 8. Open questions
 
@@ -180,3 +190,68 @@ is wrong at any chunk size and very wrong at the 1 minute currently configured).
 - [BatchRecognize](https://docs.cloud.google.com/speech-to-text/docs/batch-recognize) — GCS URI input, 8 h/file, `DYNAMIC_BATCHING`, inline or GCS output
 - [Speech-to-Text pricing](https://cloud.google.com/speech-to-text/pricing)
 - [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) — audio at 25 tokens/second
+
+---
+
+## 9. Where building contradicted this document
+
+Kept rather than edited away, because the corrections are the useful part.
+
+**Eventarc and three functions were the wrong shape.** §3 sketches an ingest
+function, a batcher and a reaper wired together with Eventarc. What shipped is
+*one* idempotent Cloud Run job that reaps then submits, on a schedule. Eventarc
+was not even enabled on the project, but that is the weaker reason. The stronger
+one: every step here is already asynchronous — resumable upload, a long-running
+operation, a 24-hour latency budget — so event plumbing buys latency nothing in
+the product can spend, at the cost of another API to enable, another identity to
+grant and another delivery semantic to reason about. Reaping *before* submitting
+in a single pass also means a run never submits a file it is about to delete.
+
+**Dynamic batching is not slow.** The tier is priced against a 24-hour SLA, and
+the production configuration returned in about **three minutes** on short files.
+That makes the cost argument stronger than §5 claims. It does not make the
+latency guarantee better, and nothing here may depend on the fast case.
+
+**A signed-URL service was missing from the design entirely.** §3 draws an arrow
+straight from the phone to the bucket, which cannot exist: the phone has no GCP
+credentials, and a service-account key inside a sideloaded APK is a key you have
+published. `echo-upload` is the smallest thing that closes that gap — it
+authorises, names the object, and returns a URL. Bytes never pass through it, so
+unlike the server it replaces it is not in the data path and holds no model.
+
+**Segments needed a wall-clock anchor and did not have one.** The first working
+version stored file-relative offsets, so a whole day stacked at 00:00. The chunk
+start now rides in the object name — `pending/<epochMillis>.<ext>` — because that
+is the one piece of metadata surviving every retry, resume and reupload for free.
+Flat, not `pending/<day>/<epoch>`: carrying the day twice let the two disagree.
+
+**Two data-loss bugs, both found by running it, neither by compiling it.** Under
+`GcsOutputConfig` the inline transcript is empty and the payload sits at
+`file_result.uri`; reading the inline field found nothing, which is
+indistinguishable from silence — and the audio was deleted anyway, because
+deletion was not conditioned on having stored something. And there is no
+`resultEndOffset` in the payload, so every segment came back `0..0`. Deletion is
+now per file and gated on the result having been *read*, which is the same
+invariant `TranscriptionPipeline` already enforces on the phone.
+
+## 10. The open decision, and why it is not mine to make
+
+Batch transcription breaks the assumption the chunk state machine rests on.
+Today a chunk is claimed, transcribed and settled in one pass, and `audioHold`
+answers a single question: *has a transcript good enough to justify deleting this
+recording been stored?*
+
+Under batch there is no such moment. The transcript arrives hours later, out of
+band, in Firestore. So `audioHold` has to answer a different question, and the
+plausible answer is that a confirmed upload means the durable copy has **moved**
+to GCS — making the local WAV redundant at upload time rather than at transcript
+time.
+
+That is probably right. It is also exactly the reasoning that produced both
+data-loss bugs in §9, and several more in `AUDIT-2026-08-06`: every one of them
+was a defensible-sounding argument for deleting audio slightly earlier than the
+evidence justified. The cost of being wrong is the only copy of someone's day.
+
+So it wants a deliberate decision, not an inference — and it should be made after
+step 2, not before, because if Chirp 3 does not hold up on real room audio then
+the question is moot and the existing path stays.
