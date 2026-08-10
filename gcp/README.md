@@ -72,3 +72,38 @@ because nothing guarantees it.
 text to Cloud Logging on every job (`AUDIT-2026-08-06` §F, P1/privacy). The
 Dockerfile still sets `LANG`/`PYTHONIOENCODING` so any Devanagari that does reach
 a log line — an error message, say — survives as text rather than `?`.
+
+## echo-upload
+
+The phone cannot hold GCP credentials — a service-account key inside a
+sideloaded APK is a key you have published — so one small service stands between
+the recorder and the bucket. It authorises, names the object, and returns a
+resumable-upload URL. **Bytes never pass through it**, so it is not in the data
+path and cannot become a bottleneck, a cost centre, or a place transcripts leak
+from. The server it replaces received the audio, held it in memory, ran a 600M
+model behind a global lock and had to stay warm to answer. This returns a string.
+
+```
+POST /v1/upload-url        X-Echo-Key: <key>
+{"startedAtMs": 1786358637983, "ext": "wav", "contentType": "audio/wav"}
+-> {"url": "<v4 signed resumable URL>", "object": "pending/1786358637983.wav"}
+```
+
+Then the client does the standard two-step: `POST` with `x-goog-resumable: start`
+to open a session, `PUT` the bytes to the returned session URI. Resumable because
+this uploads over a phone radio, where a dropped connection must continue rather
+than restart a 19 MB chunk.
+
+Signing is keyless via IAM `signBlob` — no private key in the image, in Secret
+Manager, or on disk. Note that `generate_signed_url` only takes that path when
+given **both** a service-account email and a live access token; with either
+alone it looks for a private key and fails with the misleading "you need a
+private key to sign credentials".
+
+`/health` is unauthenticated and deliberately does nothing. Its predecessor's
+unauthenticated health check woke a model-sized instance, so anyone with the URL
+could bill the project around the clock (`AUDIT-2026-08-06` §F).
+
+**Verified end to end:** minted a URL, opened a session (201), PUT a real clip
+(200), and the scheduled job picked it up, transcribed it, wrote it to Firestore
+under the right local day, and deleted the audio.
