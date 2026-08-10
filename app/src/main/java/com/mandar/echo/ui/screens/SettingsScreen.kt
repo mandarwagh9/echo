@@ -3,12 +3,12 @@ package com.mandar.echo.ui.screens
 import android.media.MediaRecorder
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,11 +28,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mandar.echo.BuildConfig
@@ -39,7 +46,9 @@ import com.mandar.echo.stt.DownloadState
 import com.mandar.echo.stt.WhisperModel
 import com.mandar.echo.ui.EchoViewModel
 import com.mandar.echo.ui.Format
+import com.mandar.echo.ui.components.EchoTextField
 import com.mandar.echo.ui.components.Hairline
+import com.mandar.echo.ui.components.MinTouchTarget
 import com.mandar.echo.ui.components.PillButton
 import com.mandar.echo.ui.components.SectionLabel
 import com.mandar.echo.ui.components.ThinProgress
@@ -57,7 +66,8 @@ fun SettingsScreen(vm: EchoViewModel) {
     val failed by vm.failedChunks.collectAsStateWithLifecycle()
     val redoable by vm.redoableChunks.collectAsStateWithLifecycle()
 
-    var confirmWipe by remember { mutableStateOf(false) }
+    // Saveable so a rotation mid-confirmation does not silently rearm the button.
+    var confirmWipe by rememberSaveable { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -73,8 +83,9 @@ fun SettingsScreen(vm: EchoViewModel) {
 
         Group("Speech model")
         Text(
-            "Transcription runs entirely on this phone. A model is downloaded once, " +
-                "then never needs the network again.",
+            "Echo's on-device engine. A model is downloaded once, then transcribes " +
+                "with no network at all. This is what runs whenever Transcribed by " +
+                "below is set to On device.",
             style = MaterialTheme.typography.bodyMedium,
             color = colors.muted,
         )
@@ -96,7 +107,12 @@ fun SettingsScreen(vm: EchoViewModel) {
                         if (selected) colors.foreground else colors.hairline,
                         RoundedCornerShape(14.dp),
                     )
-                    .clickable(enabled = installed) { vm.setModel(model) }
+                    .selectable(
+                        selected = selected,
+                        enabled = installed,
+                        role = Role.RadioButton,
+                        onClick = { vm.setModel(model) },
+                    )
                     .padding(16.dp),
             ) {
                 Row(
@@ -176,18 +192,77 @@ fun SettingsScreen(vm: EchoViewModel) {
         )
 
         if (settings.sttBackend == SttBackend.CLOUD) {
-            Spacer(Modifier.height(16.dp))
-            SettingRow(
-                "Server",
-                settings.sttServerUrl.ifBlank { "not set" },
+            Spacer(Modifier.height(18.dp))
+
+            // Re-seeded whenever the saved value changes, so a Save or a Reset
+            // pulls the fields back in step; typing does not change `settings`,
+            // so an edit in progress is never clobbered.
+            var urlDraft by remember(settings.sttServerUrl) {
+                mutableStateOf(settings.sttServerUrl)
+            }
+            var keyDraft by remember(settings.sttApiKey) { mutableStateOf(settings.sttApiKey) }
+            var revealKey by rememberSaveable { mutableStateOf(false) }
+
+            SectionLabel("Server URL")
+            Spacer(Modifier.height(8.dp))
+            EchoTextField(
+                value = urlDraft,
+                onValueChange = { urlDraft = it },
+                placeholder = "https://your-server.run.app",
+                keyboardType = KeyboardType.Uri,
             )
-            Spacer(Modifier.height(6.dp))
+
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("API key")
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                EchoTextField(
+                    value = keyDraft,
+                    onValueChange = { keyDraft = it },
+                    placeholder = "not set",
+                    masked = !revealKey,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(10.dp))
+                PillButton(if (revealKey) "Hide" else "Show") { revealKey = !revealKey }
+            }
+
+            val (defaultUrl, defaultKey) = remember { vm.buildDefaultServer() }
+            val dirty = urlDraft != settings.sttServerUrl || keyDraft != settings.sttApiKey
+            val urlLooksWrong = urlDraft.isNotBlank() && !urlDraft.startsWith("http")
+            val overridden =
+                settings.sttServerUrl != defaultUrl || settings.sttApiKey != defaultKey
+
+            Spacer(Modifier.height(14.dp))
+            Row {
+                PillButton("Save", filled = true, enabled = dirty && !urlLooksWrong) {
+                    vm.setSttServer(urlDraft, keyDraft)
+                }
+                if (overridden) {
+                    Spacer(Modifier.width(10.dp))
+                    PillButton("Use built-in") { vm.setSttServer("", "") }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
             Text(
-                if (settings.sttServerUrl.isBlank()) {
-                    "No server configured — Echo will keep using the on-device model."
-                } else {
-                    "Chunks are uploaded in 4-minute pieces. If the server cannot be " +
-                        "reached, Echo falls back to on-device rather than losing the audio."
+                when {
+                    urlLooksWrong ->
+                        "A server URL has to start with http:// or https://."
+                    urlDraft.isBlank() && defaultUrl.isBlank() ->
+                        "No server set, and none was baked in at build time — Echo will " +
+                            "keep using the on-device model."
+                    dirty ->
+                        "Not saved yet. Saving also clears a halt: a rejected key stops " +
+                            "the cloud path until the settings that could fix it change, " +
+                            "and this is that change."
+                    else ->
+                        "Voiced audio is uploaded in 2-minute pieces. If the server cannot " +
+                            "be reached the chunk waits in the queue and keeps its audio — " +
+                            "Echo does not quietly fall back to on-device, because that " +
+                            "would swap an accurate transcript for a much weaker one." +
+                            if (overridden) "" else " Leaving both fields empty uses the " +
+                                "values compiled into this build."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.muted,
@@ -319,8 +394,17 @@ fun SettingsScreen(vm: EchoViewModel) {
             color = colors.faint,
         )
         Spacer(Modifier.height(8.dp))
+        // Conditional on purpose. The old line asserted "never leave this device"
+        // unconditionally, directly below the control that sends them -- the one
+        // claim in the app a user would be right to be angry about being wrong.
         Text(
-            "Echo ${BuildConfig.VERSION_NAME} · recordings and transcripts never leave this device.",
+            if (settings.sttBackend == SttBackend.CLOUD && settings.sttServerUrl.isNotBlank()) {
+                "Echo ${BuildConfig.VERSION_NAME} · voiced audio is uploaded to your " +
+                    "server for transcription. Everything else — transcripts, summaries, " +
+                    "the audio itself — stays on this device."
+            } else {
+                "Echo ${BuildConfig.VERSION_NAME} · recordings and transcripts never leave this device."
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = colors.faint,
         )
@@ -375,7 +459,10 @@ private fun SettingRow(title: String, value: String) {
 private fun ToggleRow(title: String, body: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     val colors = EchoTheme.colors
     Row(
-        Modifier.fillMaxWidth().clickable { onChange(!checked) },
+        Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = MinTouchTarget)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange),
         verticalAlignment = Alignment.Top,
     ) {
         Column(Modifier.weight(1f)) {
@@ -397,7 +484,11 @@ private fun ToggleRow(title: String, body: String, checked: Boolean, onChange: (
                     .padding(horizontal = 3.dp)
                     .size(20.dp)
                     .clip(CircleShape)
-                    .background(if (checked) colors.background else colors.background)
+                    // Both branches used to be `background`, which in dark mode put a
+                    // black thumb on a near-black track -- an "off" switch you could
+                    // not see was off. `muted` reads against the hairline track in
+                    // both themes without adding a value to the palette.
+                    .background(if (checked) colors.background else colors.muted)
             )
         }
     }
@@ -406,12 +497,16 @@ private fun ToggleRow(title: String, body: String, checked: Boolean, onChange: (
 @Composable
 private fun ChoiceRow(options: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit) {
     val colors = EchoTheme.colors
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        Modifier.fillMaxWidth().selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         options.forEachIndexed { index, label ->
             val selected = index == selectedIndex
             Box(
                 Modifier
                     .weight(1f)
+                    .defaultMinSize(minHeight = MinTouchTarget)
                     .clip(RoundedCornerShape(100))
                     .background(if (selected) colors.inverse else colors.background)
                     .border(
@@ -419,7 +514,11 @@ private fun ChoiceRow(options: List<String>, selectedIndex: Int, onSelect: (Int)
                         if (selected) colors.inverse else colors.hairline,
                         RoundedCornerShape(100),
                     )
-                    .clickable { onSelect(index) }
+                    .selectable(
+                        selected = selected,
+                        role = Role.RadioButton,
+                        onClick = { onSelect(index) },
+                    )
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -439,6 +538,9 @@ private fun RadioDot(selected: Boolean) {
     Box(
         Modifier
             .size(14.dp)
+            // Decorative: the enclosing card already carries Role.RadioButton and
+            // its selected state, so announcing the dot too would say it twice.
+            .clearAndSetSemantics { }
             .clip(CircleShape)
             .border(1.5.dp, if (selected) colors.foreground else colors.hairline, CircleShape),
         contentAlignment = Alignment.Center,

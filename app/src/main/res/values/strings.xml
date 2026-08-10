@@ -4,7 +4,9 @@
     <string name="notif_channel_recording">Recording</string>
     <string name="notif_channel_recording_desc">Shown while Echo is listening.</string>
     <string name="notif_channel_status">Status</string>
-    <string name="notif_channel_status_desc">Backlog, storage and resume alerts.</string>
+    <string name="notif_channel_status_desc">Backlog and storage notices.</string>
+    <string name="notif_channel_alert">Not listening</string>
+    <string name="notif_channel_alert_desc">Echo should be recording but is not. Separate from Status so it can be loud without making everything else loud.</string>
     <string name="notif_channel_summary">Daily summary</string>
     <string name="notif_channel_summary_desc">Your 11 PM summary.</string>
 </resources>

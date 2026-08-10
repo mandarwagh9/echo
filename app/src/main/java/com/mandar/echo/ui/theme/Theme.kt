@@ -25,6 +25,15 @@ import androidx.core.view.WindowCompat
  * Strictly monochrome. No hue anywhere — hierarchy comes from weight, scale and
  * the opacity of hairline rules, which is what makes the app read as designed
  * rather than merely "dark mode".
+ *
+ * Every value here that carries *text* clears WCAG AA (4.5:1) against the surface
+ * it sits on. [faint] used to be #A3A3A3 on white (2.35:1) and #5E5E5E on black
+ * (3.34:1) — below the bar in both themes, and it is the colour of every section
+ * label, timestamp and stat caption in the app. #757575 happens to clear AA in
+ * both directions (4.61:1 on white, 4.56:1 on black), so one grey serves both.
+ *
+ * [hairline] is deliberately *not* held to that bar: it draws rules and inactive
+ * borders, never type. Anything that reaches for it to colour text is a bug.
  */
 @Immutable
 data class EchoColors(
@@ -45,7 +54,7 @@ private val LightColors = EchoColors(
     elevated = Color(0xFFFFFFFF),
     foreground = Color(0xFF000000),
     muted = Color(0xFF6B6B6B),
-    faint = Color(0xFFA3A3A3),
+    faint = Color(0xFF757575),
     hairline = Color(0xFFE3E3E3),
     inverse = Color(0xFF000000),
     onInverse = Color(0xFFFFFFFF),
@@ -57,7 +66,7 @@ private val DarkColors = EchoColors(
     elevated = Color(0xFF141414),
     foreground = Color(0xFFFFFFFF),
     muted = Color(0xFF9C9C9C),
-    faint = Color(0xFF5E5E5E),
+    faint = Color(0xFF757575),
     hairline = Color(0xFF212121),
     inverse = Color(0xFFFFFFFF),
     onInverse = Color(0xFF000000),
@@ -111,6 +120,16 @@ private val echoTypography = Typography(
         fontWeight = FontWeight.Normal,
         fontSize = 14.sp,
         lineHeight = 21.sp,
+    ),
+    // Settings reaches for bodySmall in two places. Undefined, it fell through to
+    // Material's stock 14 sp / 0.25 tracking -- the one place in the app where
+    // type was not coming from this file.
+    bodySmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.sp,
+        lineHeight = 19.sp,
+        letterSpacing = 0.sp,
     ),
     labelSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,

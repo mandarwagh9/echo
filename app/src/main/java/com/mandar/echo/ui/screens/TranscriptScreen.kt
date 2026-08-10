@@ -1,6 +1,7 @@
 package com.mandar.echo.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,11 +11,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -32,6 +38,7 @@ import com.mandar.echo.ui.EchoViewModel
 import com.mandar.echo.ui.Format
 import com.mandar.echo.ui.components.EmptyState
 import com.mandar.echo.ui.components.Hairline
+import com.mandar.echo.ui.components.MinTouchTarget
 import com.mandar.echo.ui.components.PillButton
 import com.mandar.echo.ui.components.SectionLabel
 import com.mandar.echo.ui.theme.EchoTheme
@@ -71,9 +78,15 @@ fun TranscriptScreen(vm: EchoViewModel) {
                 color = colors.foreground,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                PillButton("◀") { vm.selectDate(date.minusDays(1)) }
+                PillButton("◀", contentDescription = "Previous day") {
+                    vm.selectDate(date.minusDays(1))
+                }
                 Spacer(Modifier.width(8.dp))
-                PillButton("▶", enabled = date.isBefore(LocalDate.now())) {
+                PillButton(
+                    "▶",
+                    enabled = date.isBefore(LocalDate.now()),
+                    contentDescription = "Next day",
+                ) {
                     vm.selectDate(date.plusDays(1))
                 }
             }
@@ -124,42 +137,57 @@ fun TranscriptScreen(vm: EchoViewModel) {
 @Composable
 private fun SegmentRow(segment: SegmentEntity, showDate: Boolean = false) {
     val colors = EchoTheme.colors
-    Row(Modifier.fillMaxWidth().padding(bottom = 15.dp)) {
-        Column(Modifier.width(56.dp)) {
-            Text(
-                Format.clock(segment.startMs),
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.faint,
-            )
-            if (showDate) {
-                Spacer(Modifier.height(2.dp))
+    // Per row, deliberately not around the LazyColumn. A SelectionContainer
+    // measures its content so selection can span children, which is the one
+    // thing a lazy list will not let it do; copying a single line is the actual
+    // use here anyway.
+    SelectionContainer {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(bottom = 15.dp)
+                .semantics(mergeDescendants = true) { }
+        ) {
+            Column(Modifier.width(56.dp)) {
                 Text(
-                    Format.dayShort(
-                        java.time.Instant.ofEpochMilli(segment.startMs)
-                            .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-                    ),
+                    Format.clock(segment.startMs),
                     style = MaterialTheme.typography.labelSmall,
-                    color = colors.hairline,
+                    color = colors.faint,
                 )
+                if (showDate) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        Format.dayShort(
+                            java.time.Instant.ofEpochMilli(segment.startMs)
+                                .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        // Was `hairline` — the rule colour, 1.2:1 against the page.
+                        // In search results this is the only thing telling you
+                        // which day a hit came from, and it was invisible.
+                        color = colors.faint,
+                    )
+                }
             }
+            Text(
+                segment.text,
+                style = MaterialTheme.typography.bodyLarge,
+                color = colors.foreground,
+            )
         }
-        Text(
-            segment.text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = colors.foreground,
-        )
     }
 }
 
 @Composable
 private fun SearchField(value: String, onValueChange: (String) -> Unit) {
     val colors = EchoTheme.colors
-    Box(
+    Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(100))
             .background(colors.surface)
-            .padding(horizontal = 18.dp, vertical = 13.dp),
+            .padding(start = 18.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         BasicTextField(
             value = value,
@@ -170,7 +198,7 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                 imeAction = ImeAction.Search
             ),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.weight(1f).padding(vertical = 13.dp),
             decorationBox = { inner ->
                 if (value.isEmpty()) {
                     Text(
@@ -182,5 +210,26 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
                 inner()
             },
         )
+        // An active search replaces the whole day view, and the only way back out
+        // of one was to backspace it away a character at a time.
+        if (value.isNotEmpty()) {
+            Box(
+                Modifier
+                    .size(MinTouchTarget)
+                    .clip(CircleShape)
+                    .clickable(role = Role.Button, onClickLabel = "Clear search") {
+                        onValueChange("")
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "✕",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.muted,
+                )
+            }
+        } else {
+            Spacer(Modifier.width(14.dp))
+        }
     }
 }

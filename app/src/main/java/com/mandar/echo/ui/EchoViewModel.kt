@@ -168,12 +168,31 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setSttBackend(backend: com.mandar.echo.data.SttBackend) {
-        viewModelScope.launch { echo.settings.setSttBackend(backend) }
+        viewModelScope.launch {
+            echo.settings.setSttBackend(backend)
+            echo.pipeline.onCloudSettingsChanged()
+        }
     }
 
+    /**
+     * Blank url or key falls back to the value baked in at build time; see
+     * [com.mandar.echo.data.EchoSettings.setSttServer].
+     *
+     * Clearing the halt here is the point of the whole screen: a bad key stops
+     * the cloud path until the settings that could fix it change, and this is
+     * that change.
+     */
     fun setSttServer(url: String, apiKey: String) {
-        viewModelScope.launch { echo.settings.setSttServer(url, apiKey) }
+        viewModelScope.launch {
+            echo.settings.setSttServer(url, apiKey)
+            echo.pipeline.onCloudSettingsChanged()
+        }
     }
+
+    /** What the build was compiled with, so the UI can say whether it is overridden. */
+    fun buildDefaultServer(): Pair<String, String> =
+        com.mandar.echo.BuildConfig.STT_URL.trim().trimEnd('/') to
+            com.mandar.echo.BuildConfig.STT_KEY
 
     fun setAudioSource(source: Int) {
         viewModelScope.launch { echo.settings.setAudioSource(source) }

@@ -15,6 +15,18 @@ object Notifications {
     const val CHANNEL_STATUS = "status"
     const val CHANNEL_SUMMARY = "summary"
 
+    /**
+     * "Echo should be recording and is not."
+     *
+     * Its own channel because it is the only notification in the app that is
+     * allowed to be loud, and it has to be: on 2026-08-09 the resume prompt was
+     * posted on the silent default-importance Status channel at 10:20 and went
+     * unnoticed for seven hours, which is seven hours of a 24/7 recorder not
+     * recording. A separate channel also means the user can quiet Status without
+     * quieting this.
+     */
+    const val CHANNEL_ALERT = "not_listening"
+
     const val ID_RECORDING = 1001
     const val ID_STATUS = 1002
     const val ID_SUMMARY = 1003
@@ -48,6 +60,17 @@ object Notifications {
                 context.getString(R.string.notif_channel_summary),
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply { description = context.getString(R.string.notif_channel_summary_desc) }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ALERT,
+                context.getString(R.string.notif_channel_alert),
+                // HIGH, so it heads-up. The only channel here that may interrupt.
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = context.getString(R.string.notif_channel_alert_desc)
+                enableVibration(true)
+            }
         )
     }
 
@@ -90,6 +113,51 @@ object Notifications {
             .setAutoCancel(true)
             .setContentIntent(contentIntent(context))
             .build()
+
+    /** Set on the resume intent so [MainActivity] knows to start capture on open. */
+    const val EXTRA_RESUME = "com.mandar.echo.RESUME"
+
+    /**
+     * The recorder should be running and is not — after a reboot, or after the
+     * mic was taken and not given back.
+     *
+     * Both the tap and the action open the app rather than poking the service
+     * directly: a `microphone` foreground service cannot be started from the
+     * background on Android 14+, so the only compliant resume path is through a
+     * visible activity. The button exists because "tap this text" is not an
+     * affordance anyone reads at a glance in a crowded shade.
+     */
+    fun notListening(context: Context, title: String, body: String): android.app.Notification {
+        val resume = PendingIntent.getActivity(
+            context,
+            2,
+            Intent(context, MainActivity::class.java)
+                .setAction(Intent.ACTION_MAIN)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(EXTRA_RESUME, true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_ALERT)
+            .setSmallIcon(R.drawable.ic_stat_echo)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            // Ongoing, and explicitly not auto-cancelling. The old one could be
+            // swiped away by accident, after which nothing anywhere said the
+            // recorder was off. It is cleared when capture actually resumes.
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setCategory(NotificationCompat.CATEGORY_ERROR)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(resume)
+            .addAction(0, "Resume recording", resume)
+            .build()
+    }
+
+    fun cancel(context: Context, id: Int) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        runCatching { nm.cancel(id) }
+    }
 
     fun summaryReady(context: Context, headline: String, body: String): android.app.Notification =
         NotificationCompat.Builder(context, CHANNEL_SUMMARY)

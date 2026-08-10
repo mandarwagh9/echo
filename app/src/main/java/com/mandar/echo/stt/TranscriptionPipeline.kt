@@ -439,6 +439,20 @@ class TranscriptionPipeline(
      * far more thoroughly than a delay does. Two things override that: the audio
      * backlog reaching [MAX_RETAINED_BYTES], and a server that answered and refused.
      */
+    /**
+     * The cloud configuration changed, so a configuration halt is no longer
+     * evidence about the *current* settings.
+     *
+     * This has to exist as its own entry point. [CloudGate.clearHalt] is
+     * otherwise only reached on a successful round trip, and
+     * [CloudGate.blockedReason] reports the halt before anything can attempt
+     * one — so a rotated key halted the path until the process was killed, and
+     * correcting the key in Settings changed nothing.
+     */
+    fun onCloudSettingsChanged() {
+        gate.clearHalt()
+    }
+
     private suspend fun runBackends(
         chunk: ChunkEntity,
         cfg: Settings,

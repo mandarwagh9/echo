@@ -42,11 +42,12 @@ class BootReceiver : BroadcastReceiver() {
                     Notifications.notify(
                         context,
                         Notifications.ID_RESUME,
-                        Notifications.status(
+                        Notifications.notListening(
                             context,
                             "Echo is not listening",
                             "Android does not let apps restart microphone recording " +
-                                "automatically after a reboot. Tap to resume.",
+                                "automatically after a reboot. Resume to carry on " +
+                                "recording your day.",
                         ),
                     )
                 }

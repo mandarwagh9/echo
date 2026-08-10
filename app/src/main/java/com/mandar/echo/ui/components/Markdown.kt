@@ -10,6 +10,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -49,8 +51,29 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
                 }
 
-                line.startsWith("- ") -> Row(Modifier.padding(bottom = 7.dp)) {
-                    Text("—", color = colors.faint, style = MaterialTheme.typography.bodyLarge)
+                line.startsWith("### ") -> {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        line.removePrefix("### "),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = colors.foreground,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+
+                line.startsWith("- ") -> Row(
+                    Modifier
+                        .padding(bottom = 7.dp)
+                        .semantics(mergeDescendants = true) { }
+                ) {
+                    Text(
+                        "—",
+                        color = colors.faint,
+                        style = MaterialTheme.typography.bodyLarge,
+                        // Decoration. Without this every bullet is read aloud as
+                        // "dash" before the sentence that matters.
+                        modifier = Modifier.clearAndSetSemantics { },
+                    )
                     Spacer(Modifier.width(10.dp))
                     Text(
                         inline(line.removePrefix("- "), colors.foreground),
@@ -59,8 +82,13 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                     )
                 }
 
-                line.startsWith("_") && line.endsWith("_") && line.length > 2 -> Text(
-                    line.trim('_'),
+                // Exactly two underscores, so this is a whole-line aside and not a
+                // line that merely happens to begin and end with emphasis. The old
+                // test matched "_a_ and _b_" and then `trim('_')` stripped both
+                // ends while leaving the pair in the middle.
+                line.startsWith("_") && line.endsWith("_") && line.length > 2 &&
+                    line.count { it == '_' } == 2 -> Text(
+                    line.removeSurrounding("_"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = colors.faint,
                     fontStyle = FontStyle.Italic,

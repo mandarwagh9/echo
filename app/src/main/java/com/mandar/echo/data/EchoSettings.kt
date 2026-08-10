@@ -107,9 +107,19 @@ class EchoSettings(private val context: Context) {
 
     suspend fun setSttBackend(backend: SttBackend) = edit { it[Keys.BACKEND] = backend.name }
 
-    suspend fun setSttServer(url: String, apiKey: String) = edit {
-        it[Keys.SERVER_URL] = url.trim().trimEnd('/')
-        it[Keys.API_KEY] = apiKey.trim()
+    /**
+     * Blank means "use the build-time default", and the build-time default is
+     * reached by the key being *absent* — see [flow].
+     *
+     * Writing "" instead would override `BuildConfig.STT_URL` with an empty
+     * string, which reads as "no server configured" with no way back to the
+     * built-in one from inside the app.
+     */
+    suspend fun setSttServer(url: String, apiKey: String) = edit { p ->
+        val u = url.trim().trimEnd('/')
+        val k = apiKey.trim()
+        if (u.isEmpty()) p.remove(Keys.SERVER_URL) else p[Keys.SERVER_URL] = u
+        if (k.isEmpty()) p.remove(Keys.API_KEY) else p[Keys.API_KEY] = k
     }
 
     suspend fun setLanguage(language: SttLanguage) = edit { it[Keys.LANGUAGE] = language.code }

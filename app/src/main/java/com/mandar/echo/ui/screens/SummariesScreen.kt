@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -22,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mandar.echo.ui.EchoViewModel
@@ -69,9 +71,15 @@ fun SummariesScreen(vm: EchoViewModel) {
                 )
             }
             Row {
-                PillButton("◀") { vm.selectDate(date.minusDays(1)) }
+                PillButton("◀", contentDescription = "Previous day") {
+                    vm.selectDate(date.minusDays(1))
+                }
                 Spacer(Modifier.width(8.dp))
-                PillButton("▶", enabled = date.isBefore(LocalDate.now())) {
+                PillButton(
+                    "▶",
+                    enabled = date.isBefore(LocalDate.now()),
+                    contentDescription = "Next day",
+                ) {
                     vm.selectDate(date.plusDays(1))
                 }
             }
@@ -116,7 +124,10 @@ fun SummariesScreen(vm: EchoViewModel) {
             SectionLabel("written at ${Format.clock(current.generatedAt)}")
             Spacer(Modifier.height(10.dp))
             Hairline()
-            MarkdownText(current.bodyMarkdown, Modifier.fillMaxWidth())
+            // The write-up of your day is the thing most worth quoting elsewhere.
+            SelectionContainer {
+                MarkdownText(current.bodyMarkdown, Modifier.fillMaxWidth())
+            }
             Spacer(Modifier.height(18.dp))
             PillButton("Rebuild") { vm.generateSummaryNow() }
         }
@@ -133,7 +144,10 @@ fun SummariesScreen(vm: EchoViewModel) {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { vm.selectDate(itemDate) }
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "Open ${Format.dayShort(itemDate)}",
+                        ) { vm.selectDate(itemDate) }
                         .padding(vertical = 12.dp),
                 ) {
                     Text(

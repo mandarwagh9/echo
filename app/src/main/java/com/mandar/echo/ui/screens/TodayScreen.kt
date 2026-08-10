@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mandar.echo.ui.EchoViewModel
@@ -58,15 +60,6 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
     val chunks by vm.chunksForDay.collectAsStateWithLifecycle()
     val dropped by vm.droppedSamples.collectAsStateWithLifecycle()
     val download by vm.downloadState.collectAsStateWithLifecycle()
-
-    // Drives the running clock without recomposing anything else every second.
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(recording) {
-        while (recording) {
-            now = System.currentTimeMillis()
-            delay(1000)
-        }
-    }
 
     // Keyed on download state too: modelFile does not change when a download
     // finishes, so without it the "install a model" notice would never clear.
@@ -128,15 +121,11 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
             color = colors.foreground,
         )
         Spacer(Modifier.height(6.dp))
-        Text(
-            text = when {
-                recording && sessionStart != null -> "for ${Format.elapsed(sessionStart!!, now)}"
-                paused != null -> paused!!
-                !hasModel -> "No speech model installed yet"
-                else -> "Tap to start capturing your day"
-            },
-            style = MaterialTheme.typography.bodyLarge,
-            color = colors.muted,
+        StatusLine(
+            recording = recording,
+            sessionStart = sessionStart,
+            paused = paused,
+            hasModel = hasModel,
         )
 
         Spacer(Modifier.height(30.dp))
@@ -265,19 +254,31 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
             Spacer(Modifier.height(28.dp))
             SectionLabel("Latest")
             Spacer(Modifier.height(14.dp))
-            segments.takeLast(6).reversed().forEach { seg ->
-                Row(Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
-                    Text(
-                        Format.clock(seg.startMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.faint,
-                        modifier = Modifier.width(52.dp),
-                    )
-                    Text(
-                        seg.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = colors.foreground,
-                    )
+            SelectionContainer {
+                Column {
+                    segments.takeLast(6).reversed().forEach { seg ->
+                        // Merged: unmerged, a screen reader reads the timestamp and
+                        // the sentence as two unrelated items and you lose which is
+                        // which.
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 14.dp)
+                                .semantics(mergeDescendants = true) { }
+                        ) {
+                            Text(
+                                Format.clock(seg.startMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.faint,
+                                modifier = Modifier.width(52.dp),
+                            )
+                            Text(
+                                seg.text,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = colors.foreground,
+                            )
+                        }
+                    }
                 }
             }
         } else if (recording) {
@@ -292,6 +293,41 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
 
         Spacer(Modifier.height(48.dp))
     }
+}
+
+/**
+ * The line under "Listening" — and the only thing on this screen that changes
+ * once a second.
+ *
+ * The tick lives in here rather than in [TodayScreen] so the invalidation stops
+ * at this Text. Read at the top level it restarted the whole screen's scope
+ * every second, level meter and transcript list included, for the sake of one
+ * changing digit.
+ */
+@Composable
+private fun StatusLine(
+    recording: Boolean,
+    sessionStart: Long?,
+    paused: String?,
+    hasModel: Boolean,
+) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(recording) {
+        while (recording) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    Text(
+        text = when {
+            recording && sessionStart != null -> "for ${Format.elapsed(sessionStart, now)}"
+            paused != null -> paused
+            !hasModel -> "No speech model installed yet"
+            else -> "Tap to start capturing your day"
+        },
+        style = MaterialTheme.typography.bodyLarge,
+        color = EchoTheme.colors.muted,
+    )
 }
 
 @Composable
