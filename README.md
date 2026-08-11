@@ -1,8 +1,12 @@
 # Echo
 
-A 24/7 ambient audio journal for Android. It listens all day, transcribes what it hears
-**entirely on the phone**, deletes each recording as soon as its transcript is safely stored,
-and writes up your day at 11 PM.
+A 24/7 ambient audio journal for Android. It listens all day, transcribes what it hears,
+deletes each recording as soon as its transcript is safely stored, and writes up your day at
+11 PM.
+
+Transcription runs **on the phone by default**. Two backends that send audio off it are
+available and off until chosen — see [Transcription backends](#transcription-backends). That
+choice is the most consequential setting in the app.
 
 Built as a personal prototype for a single device — not a shippable product. See
 [Privacy and legal](#privacy-and-legal).
@@ -22,8 +26,8 @@ mic ──► 10-minute WAV chunks ──► on-device Whisper ──► transcr
   does nothing but drain `AudioRecord`, so disk or CPU stalls can never cost you audio.
 - **Chunks are sample-exact.** Rotation happens at exactly 9,600,000 samples without ever
   stopping the recorder, so chunk *N+1* starts on the sample after chunk *N*. No gaps.
-- **Transcribes offline.** whisper.cpp compiled for arm64, running on 2–4 threads. Nothing
-  is uploaded, ever. The only network call the app makes is the one-time model download.
+- **Transcribes offline by default.** whisper.cpp compiled for arm64, running on 2–4 threads.
+  On the default backend the only network call the app makes is the one-time model download.
 - **Multilingual.** English, Hindi and Marathi, with per-chunk auto-detection so code-switched
   speech survives.
 - **Deletes audio.** The WAV is unlinked only after the transcript commits — never before.
@@ -71,7 +75,7 @@ length → 1 minute**.
 
 ## Status
 
-Working prototype. **On a Pixel 9 (Android 17):** 42 JVM unit tests and 11 instrumented tests
+Working prototype. **On a Pixel 9 (Android 17):** the JVM suite and 11 instrumented tests
 passing, plus the throughput measurement below. **On an Android 16 emulator:** a live recording
 run confirming sample-exact chunking and audio deletion, and the 11 PM summary chain fired end
 to end — neither of which has been repeated on the phone yet. Full record, including the eleven
@@ -82,6 +86,28 @@ bugs the process surfaced and an explicit list of what remains unverified, is in
 66 s of audio transcribed in 12.5 s, which puts a full 10-minute chunk at about **113 seconds**.
 That is the number that decides whether a 24/7 app can drain its queue, and it has a comfortable
 margin. (The emulator's 0.48× was Tiny on an x86_64 CPU without AVX2 and was never meaningful.)
+
+## Transcription backends
+
+Three, chosen in Settings. Only the first is a default.
+
+| | Where | Hindi / Marathi | Trade |
+|---|---|---|---|
+| **On device** | whisper.cpp, this phone | 0.23 / **0.00** | Nothing leaves. Cannot do Devanagari. |
+| **Your server** | self-hosted IndicConformer-600M | 1.00 / 1.00 | Audio uploaded to a server you run. |
+| **Batch (Chirp 3)** | Google Cloud, `gcp/` | 1.00 / 1.00 | Audio uploaded, transcribed later, cheapest. |
+
+Word recall against known references — see [docs/VERIFICATION.md](docs/VERIFICATION.md) for the
+on-device numbers and [eval/chirp3_eval.py](eval/chirp3_eval.py) for Chirp 3's. **Every one of
+those figures is from clips synthesised by text-to-speech, not far-field room audio**, so read
+them as a floor on how bad a model is, not a promise of how good.
+
+Marathi at 0.00 is why the other two exist. It is not "worse", it is nothing: a day of Marathi
+through Whisper Base produces a transcript that is not a transcript.
+
+**The batch backend keeps your recording on the phone until its transcript comes back.** An
+upload proves a copy reached a bucket, not that anything read it. See
+[docs/ARCH-2026-08-10-batch-first.md](docs/ARCH-2026-08-10-batch-first.md).
 
 ## Design notes
 
@@ -132,7 +158,8 @@ Anything else would fail silently.
 
 ## Privacy and legal
 
-Audio and transcripts never leave the device. Storage is app-private, cloud backup is disabled,
+**On the default backend**, audio and transcripts never leave the device — and the other two
+backends are opt-in, not defaults. Storage is app-private, cloud backup is disabled,
 and "Delete everything" really does wipe the database and files.
 
 That does not make this app safe to use casually. **It records people who have not consented.**
@@ -153,6 +180,8 @@ app/src/main/
     summary/           summariser, TextRank, scheduling
     ui/                Compose screens, monochrome design system
 app/src/test/          JVM unit tests
+eval/                  chirp3_eval.py — scores a backend on the shared fixtures
+gcp/                   the batch tier: upload service, batch job, nightly summary
 third_party/whisper.cpp
 ```
 
