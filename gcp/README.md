@@ -109,3 +109,29 @@ could bill the project around the clock (`AUDIT-2026-08-06` §F).
 **Verified end to end:** minted a URL, opened a session (201), PUT a real clip
 (200), and the scheduled job picked it up, transcribed it, wrote it to Firestore
 under the right local day, and deleted the audio.
+
+## Tests
+
+```bash
+python -m unittest discover -s gcp/tests -t gcp
+```
+
+Offline and hermetic. They cover the two things in this service that decide
+whether a recording survives, both of which shipped broken and were caught by
+running the pipeline rather than reading it:
+
+- **The transcript is read from the GCS output object, not the inline field.**
+  Under `GcsOutputConfig` the inline `transcript` is empty and the payload sits
+  at `file_result.uri`. Reading the inline field finds nothing — which is
+  indistinguishable from silence, and silence is a settled answer that releases
+  the recording. An unreadable result now raises rather than reading as empty,
+  because the caller uses "did this parse" to decide whether audio is expendable.
+- **Timings come from the words.** There is no `resultEndOffset` in the payload,
+  so reading for one produced `0..0` for every segment and would have stacked a
+  whole day at midnight. The first word omits `startOffset` entirely when it
+  begins at zero, which the test pins.
+
+Plus the object-naming contract (`pending/<epochMillis>.wav` is the only
+wall-clock anchor a transcript ever gets; a non-epoch name yields `None` rather
+than 1970), the local-timezone day boundary, and that `_release` drops only the
+claim key while `_delete` touches only objects that exist.
