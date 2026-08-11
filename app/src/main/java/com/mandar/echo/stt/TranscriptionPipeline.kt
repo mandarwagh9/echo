@@ -135,6 +135,18 @@ class TranscriptionPipeline(
          * never advances.
          */
         const val MAX_ABANDONED_CLAIMS = 3
+
+        /**
+         * How long a chunk may sit at the batch pipeline before it is queued
+         * again.
+         *
+         * Longer than the tier's own 24-hour SLA, so a slow-but-working batch is
+         * never mistaken for a lost one, and shorter than the bucket's three-day
+         * lifecycle, so the requeue happens while the uploaded copy still exists
+         * rather than after it has been swept. Those two numbers are the actual
+         * bounds; 30 hours sits between them with room either side.
+         */
+        const val UPLOAD_TIMEOUT_MS = 30L * 60 * 60 * 1000
     }
 
     private val appContext = context.applicationContext
@@ -345,6 +357,14 @@ class TranscriptionPipeline(
         if (cfg.uploadUrl.isBlank() || cfg.uploadKey.isBlank()) return
         val done = batchSync.run(cfg)
         if (done > 0) Log.i(TAG, "batch pipeline returned $done transcript(s)")
+
+        // Anything still waiting after this long is not coming. Queue it again
+        // rather than leaving it stranded: the recording is still on this device,
+        // which is exactly what the hold was for.
+        val reclaimed = db.chunkDao().reclaimStuckUploads(clock() - UPLOAD_TIMEOUT_MS)
+        if (reclaimed > 0) {
+            Log.w(TAG, "$reclaimed chunk(s) never came back from the batch pipeline; requeued")
+        }
     }
 
     /**

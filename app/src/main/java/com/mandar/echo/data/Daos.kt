@@ -119,6 +119,30 @@ abstract class ChunkDao {
     abstract suspend fun pendingCountNow(): Int
 
     /**
+     * Give up waiting on the batch pipeline and queue the chunk again.
+     *
+     * An UPLOADED chunk is claimed by nothing and matched by neither recovery
+     * button -- "Retry failed" takes FAILED and "Redo" takes REDOABLE -- so
+     * without this a transcript that never arrives strands the recording for
+     * ever, holding audio no sweep may release. Which is not hypothetical: the
+     * bucket's lifecycle rule deletes the uploaded copy on a timer whether or
+     * not anything read it.
+     *
+     * Safe to re-run because the object name is derived from `startedAt`, so a
+     * second upload overwrites the first rather than duplicating it, and the
+     * audio it needs is still on this device -- that is the whole reason the WAV
+     * was kept.
+     */
+    @Query(
+        """
+        UPDATE chunks SET status = 'PENDING', audioHold = NULL, notBefore = 0,
+            transientFailures = transientFailures + 1
+        WHERE status = 'UPLOADED' AND filePath IS NOT NULL AND startedAt < :cutoff
+        """
+    )
+    abstract suspend fun reclaimStuckUploads(cutoff: Long): Int
+
+    /**
      * Chunks the batch pipeline has and this device is waiting on.
      *
      * Deliberately not folded into [pendingCount]. "In queue" means work this

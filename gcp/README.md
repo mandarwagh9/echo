@@ -39,13 +39,15 @@ the inline field looked exactly like silence.
 ## Infrastructure
 
 ```
-gs://agentbillboard-echo-ingest    pending/ audio, 1-day lifecycle backstop
-gs://agentbillboard-echo-results   out/ BatchRecognizeResults JSON, 1-day
+gs://agentbillboard-echo-ingest    pending/ audio, 3-day lifecycle backstop
+gs://agentbillboard-echo-results   out/ BatchRecognizeResults JSON, 3-day
 firestore db "echo"                echo_batches, echo_segments
 ```
 
-Both buckets carry a one-day delete rule so audio cannot outlive its purpose
-even if the reaper never runs.
+Both buckets carry a three-day delete rule so audio cannot outlive its purpose
+even if the reaper never runs. Three rather than one because dynamic batching is
+priced against a 24-hour SLA -- a one-day rule races the tier the whole design
+rests on, and would delete a recording that was still legitimately queued.
 
 ## Deployed
 

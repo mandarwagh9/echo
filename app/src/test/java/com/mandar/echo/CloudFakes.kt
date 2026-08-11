@@ -168,6 +168,21 @@ internal class FakeChunkDao : ChunkDao() {
         rows[id]?.let { rows[id] = it.copy(endedAt = endedAt, sampleCount = sampleCount, status = status) }
     }
 
+    override suspend fun reclaimStuckUploads(cutoff: Long): Int {
+        val hit = rows.values.filter {
+            it.status == ChunkStatus.UPLOADED && it.filePath != null && it.startedAt < cutoff
+        }
+        hit.forEach {
+            rows[it.id] = it.copy(
+                status = ChunkStatus.PENDING,
+                audioHold = null,
+                notBefore = 0,
+                transientFailures = it.transientFailures + 1,
+            )
+        }
+        return hit.size
+    }
+
     override fun awaitingRemoteCount(): kotlinx.coroutines.flow.Flow<Int> =
         kotlinx.coroutines.flow.flowOf(rows.values.count { it.status == ChunkStatus.UPLOADED })
 

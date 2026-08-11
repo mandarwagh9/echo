@@ -22,9 +22,15 @@ gcloud services enable \
   artifactregistry.googleapis.com --project "$PROJECT"
 
 echo "== buckets =="
-# A one-day delete rule on both, so audio cannot outlive its purpose even if the
-# reaper never runs. The reaper deleting on commit is the mechanism; this is the
-# backstop, and it belongs in infrastructure rather than application logic.
+# A three-day delete rule on both, so audio cannot outlive its purpose even if
+# the reaper never runs. The reaper deleting on commit is the mechanism; this is
+# the backstop, and it belongs in infrastructure rather than application logic.
+#
+# Three, not one. Dynamic batching is priced against a 24-hour SLA, so a one-day
+# rule races the very tier this design is built on: an object uploaded at hour
+# zero and transcribed at hour twenty is deleted at hour twenty-four, and the
+# margin between "backstop" and "deletes the recording before anything reads it"
+# was four hours. The backstop has to outlast the thing it is backing up.
 for bucket in "$INGEST" "$RESULTS"; do
   gcloud storage buckets create "gs://$bucket" --project "$PROJECT" \
     --location "$SPEECH_LOCATION" --uniform-bucket-level-access 2>/dev/null || true
