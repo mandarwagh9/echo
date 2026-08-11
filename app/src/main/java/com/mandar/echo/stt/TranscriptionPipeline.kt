@@ -478,33 +478,38 @@ class TranscriptionPipeline(
         try {
             WavWriter.repairIfTruncated(file)
             val samples = WavWriter.readAsFloats(file)
-            val vad = VoiceActivityDetector.analyse(samples)
 
-            // `wordCount > 0` vetoes the silence short-circuit, and it has to.
+            // One pass, one answer. A backend only ever sees the voiced parts —
+            // feeding the silence in between is what produced pages of invented,
+            // looping text — and the same regions decide whether there is anything
+            // here at all. Those were once two separate tests that could disagree,
+            // which is what the `wordCount` veto below still guards against.
+            val voiced = VoiceActivityDetector.analyse(samples)
+
+            // `wordCount > 0` vetoes the silence short-circuit, and it still has to.
             //
             // This chunk can be here for the second time: a redo re-runs the gate
-            // with today's settings, and the two silence tests do not agree —
-            // analyse() wants 2% of frames above the noise floor, extractVoiced()
-            // keeps any merged run of 400 ms. A ten-minute chunk holding one
-            // sentence fails the first and passes the second. So a user who turned
-            // "skip silent chunks" on and then tapped Redo, hoping for a better
-            // transcript, instead ran commitSilent over a chunk that already had
-            // one: settle() clears the chunk's segments before writing, so the text
-            // was destroyed, the row went SILENT, and the WAV was released. It then
+            // with today's settings and today's thresholds, which are not the ones
+            // that produced the transcript it already has. A user who turned "skip
+            // silent chunks" on and then tapped Redo, hoping for a better transcript,
+            // would otherwise run commitSilent over a chunk that already had one:
+            // settle() clears the chunk's segments before writing, so the text was
+            // destroyed, the row went SILENT, and the WAV was released. It then
             // appeared in neither the failed list nor the redo list. Words we have
-            // already recovered from this audio are proof it is not silence,
-            // whatever the ratio says this time.
-            if (cfg.skipSilentChunks && !vad.hasSpeech && chunk.wordCount == 0) {
-                Log.i(TAG, "chunk ${chunk.id} is silent (ratio=${vad.speechRatio}); not transcribing")
-                return commitSilent(chunk, lease, attempts, vad.speechRatio, file, cfg)
+            // already recovered from this audio are proof it is not silence, whatever
+            // the gate says this time.
+            if (cfg.skipSilentChunks && !voiced.hasSpeech && chunk.wordCount == 0) {
+                Log.i(
+                    TAG,
+                    "chunk ${chunk.id} is silent (${voiced.rawVoicedMs} ms voiced, " +
+                        "ratio=${voiced.speechRatio}); not transcribing",
+                )
+                return commitSilent(chunk, lease, attempts, voiced.speechRatio, file, cfg)
             }
 
-            // A backend only ever sees the voiced parts. Feeding the silence in
-            // between is what produced pages of invented, looping text.
-            val voiced = VoiceActivityDetector.extractVoiced(samples)
             if (voiced.isEmpty) {
                 Log.i(TAG, "chunk ${chunk.id} has no voiced regions after gating")
-                return commitSilent(chunk, lease, attempts, vad.speechRatio, file, cfg)
+                return commitSilent(chunk, lease, attempts, voiced.speechRatio, file, cfg)
             }
 
             // The batch backend's unit of work is the chunk file itself, not the
@@ -517,10 +522,11 @@ class TranscriptionPipeline(
             val underPressure = underAudioPressure()
 
             if (usesBatch(cfg)) {
-                val gatedMs = voiced.samples.size * 1000L / AudioFormatSpec.SAMPLE_RATE
                 when {
                     !underPressure ->
-                        return handOffToBatch(chunk, lease, attempts, cfg, file, vad.speechRatio, gatedMs)
+                        return handOffToBatch(
+                            chunk, lease, attempts, cfg, file, voiced.speechRatio, voiced.voicedMs,
+                        )
 
                     // Over the cap. An uploaded chunk holds AWAITING_REMOTE, and
                     // the disk valve may only trade DEGRADED -- so uploading more
@@ -557,12 +563,12 @@ class TranscriptionPipeline(
                 }
 
                 is Attempt.Fail -> {
-                    failChunk(chunk, lease, attempts, attempt.reason, vad.speechRatio, voicedMs)
+                    failChunk(chunk, lease, attempts, attempt.reason, voiced.speechRatio, voicedMs)
                     true
                 }
 
                 is Attempt.Text -> {
-                    commitText(chunk, lease, attempts, attempt, voiced, vad.speechRatio, voicedMs, cfg, file)
+                    commitText(chunk, lease, attempts, attempt, voiced, voiced.speechRatio, voicedMs, cfg, file)
                     true
                 }
             }

@@ -190,8 +190,20 @@ returns `error_message` on status but `error` on submit refusals.
 ## Settled decisions — do not re-litigate
 
 - **No classifier VAD.** Silero was wired end to end and measured *worse* (Hindi recall
-  0.385 → 0.231; it fights `carry_initial_prompt`) — commit `3440259`. The open question is the
-  existing energy gate's tuning, not whether to add a model.
+  0.385 → 0.231; it fights `carry_initial_prompt`) — commit `3440259`. The energy gate's tuning
+  was the open question and is now answered in `VadCalibrationTest`; adding a model still is not.
+- **The gate has one entry point and decides on duration, not ratio.**
+  `VoiceActivityDetector.analyse` returns the regions, and `hasSpeech`/`speechRatio` are summaries
+  of them. It used to expose two tests that answered the same question differently, and a chunk on
+  which they disagreed had its transcript destroyed and its WAV released. Do not add a second
+  gate. `MIN_VOICED_MS` is absolute on purpose: a bar denominated as a fraction of chunk length
+  moves every time chunk length is reconfigured, which is how a lone sentence in a 10-minute chunk
+  was deleted as silence.
+- **Change a VAD constant only with `VadCalibrationTest` output in front of you.** It reads the
+  four real WAV fixtures, mixes them into synthetic noise, and prints the frame-energy
+  distribution the constants were picked from. Recall cannot be measured in the field at all — a
+  chunk wrongly called silent has its WAV deleted, so there is nothing left to count — which makes
+  that file the only check on the direction that loses recordings.
 - **Never send English to the server.** `en-IN` is absent from its language map and coerces to
   Malayalam, which returns HTTP 200 with plausible non-empty text — a failure that looks exactly
   like success. `CloudTranscriber.supports` is `hi`/`mr`/`auto` only.

@@ -134,9 +134,18 @@ actual speech (~90 h/month):
 | Voiced only, Gemini Flash audio | ~$8 + output |
 
 The gate stops being a correctness device — it was there because Whisper
-hallucinates over silence — and becomes an 8× cost lever. Worth retuning for that
-reason alone (`AUDIT` §D flags its threshold as a fraction *of chunk length*, which
-is wrong at any chunk size and very wrong at the 1 minute currently configured).
+hallucinates over silence — and becomes an 8× cost lever.
+
+Retuned on 2026-08-11, and both `AUDIT` §D defects are closed: the bar is now an
+absolute 1 s of voiced audio rather than a fraction of chunk length, and a chunk
+with no real noise floor is measured from its median instead of its 20th
+percentile. The second change is the one that moves this table — continuous noise
+previously passed the gate end to end, so a night of television or traffic was
+uploaded in full. **The 3 h/day figure above predates the fix and has not been
+re-measured**; it is now an upper bound rather than an estimate. What the change is
+worth in practice cannot be settled from `docs/stt-health-*` either, because the
+85 %-empty night there may equally be the silenced-microphone defect (§D, P0),
+which deletes audio without the gate being involved at all.
 
 ## 6. What this costs you — stated plainly
 

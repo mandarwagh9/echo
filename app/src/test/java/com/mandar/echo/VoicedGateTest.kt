@@ -37,7 +37,7 @@ class VoicedGateTest {
 
     @Test
     fun pureSilenceYieldsNothing() {
-        val v = VoiceActivityDetector.extractVoiced(silence(10.0))
+        val v = VoiceActivityDetector.analyse(silence(10.0))
         assertTrue("silence produced ${v.samples.size} samples", v.isEmpty)
         assertTrue(v.regions.isEmpty())
     }
@@ -46,7 +46,7 @@ class VoicedGateTest {
     fun aSingleUtteranceIsIsolatedWithPadding() {
         // 3 s silence, 2 s tone, 3 s silence
         val audio = concat(silence(3.0), tone(2.0), silence(3.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
 
         assertEquals(1, v.regions.size)
         val r = v.regions[0]
@@ -64,7 +64,7 @@ class VoicedGateTest {
     fun twoUtterancesSurviveAsSeparateRegions() {
         // tone at 3-5 s and at 8-9 s, gap far wider than MERGE_GAP_MS
         val audio = concat(silence(3.0), tone(2.0), silence(3.0), tone(1.0), silence(1.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         assertEquals("regions: ${v.regions.map { it.first / rate.toDouble() }}", 2, v.regions.size)
     }
 
@@ -72,7 +72,7 @@ class VoicedGateTest {
     fun shortTransientsAreRejected() {
         // 80 ms click -- a door, a keyboard, not a word.
         val audio = concat(silence(3.0), tone(0.08), silence(3.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         assertTrue("a click became ${v.regions.size} region(s)", v.regions.isEmpty())
     }
 
@@ -84,14 +84,14 @@ class VoicedGateTest {
             tone(0.6), silence(0.3), tone(0.6), silence(0.3), tone(0.6),
             silence(2.0),
         )
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         assertEquals(1, v.regions.size)
     }
 
     @Test
     fun timestampsMapBackToTheOriginalRecording() {
         val audio = concat(silence(3.0), tone(2.0), silence(3.0), tone(1.0), silence(1.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         assertEquals(2, v.regions.size)
 
         // The start of the compacted stream is the start of the first utterance.
@@ -123,7 +123,7 @@ class VoicedGateTest {
     @Test
     fun mappingIsClampedInsideTheAudio() {
         val audio = concat(silence(1.0), tone(1.0), silence(1.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         // Whisper can round a final timestamp past the end of what it was given.
         val beyond = v.originalMs(60_000)
         assertTrue("mapped $beyond ms, past the 3 s recording", beyond <= 3_000)
@@ -132,7 +132,7 @@ class VoicedGateTest {
     @Test
     fun compactedLengthMatchesTheRegions() {
         val audio = concat(silence(2.0), tone(1.0), silence(2.0), tone(1.5), silence(1.0))
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         val expected = v.regions.sumOf { it.last - it.first + 1 }
         assertEquals(expected, v.samples.size)
     }
@@ -142,7 +142,7 @@ class VoicedGateTest {
         val audio = concat(
             silence(1.0), tone(0.8), silence(1.2), tone(0.8), silence(1.2), tone(0.8), silence(1.0),
         )
-        val v = VoiceActivityDetector.extractVoiced(audio)
+        val v = VoiceActivityDetector.analyse(audio)
         for (i in 1 until v.regions.size) {
             assertTrue(
                 "region $i starts at ${v.regions[i].first} before ${v.regions[i - 1].last} ends",
