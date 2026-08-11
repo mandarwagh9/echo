@@ -121,7 +121,13 @@ fun SummariesScreen(vm: EchoViewModel) {
                 color = colors.foreground,
             )
             Spacer(Modifier.height(6.dp))
-            SectionLabel("written at ${Format.clock(current.generatedAt)}")
+            SectionLabel(
+                if (current.provisional) {
+                    "provisional · written at ${Format.clock(current.generatedAt)}"
+                } else {
+                    "written at ${Format.clock(current.generatedAt)}"
+                }
+            )
             Spacer(Modifier.height(10.dp))
             Hairline()
             // The write-up of your day is the thing most worth quoting elsewhere.
@@ -129,7 +135,9 @@ fun SummariesScreen(vm: EchoViewModel) {
                 MarkdownText(current.bodyMarkdown, Modifier.fillMaxWidth())
             }
             Spacer(Modifier.height(18.dp))
-            PillButton("Rebuild") { vm.generateSummaryNow() }
+            PillButton(if (current.provisional) "Rebuild now" else "Rebuild") {
+                vm.generateSummaryNow()
+            }
         }
 
         if (all.isNotEmpty()) {

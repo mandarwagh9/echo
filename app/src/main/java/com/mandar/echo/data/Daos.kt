@@ -331,7 +331,8 @@ abstract class ChunkDao {
     @Query(
         """
         SELECT COUNT(*) FROM chunks
-        WHERE startedAt BETWEEN :from AND :to AND status IN ('RECORDING','PENDING','TRANSCRIBING')
+        WHERE startedAt BETWEEN :from AND :to
+          AND status IN ('RECORDING','PENDING','TRANSCRIBING','UPLOADED')
         """
     )
     abstract suspend fun unsettledBetween(from: Long, to: Long): Int

@@ -123,12 +123,36 @@ class SummaryEngine(
         val headline = buildHeadline(stats)
         val body = buildBody(stats, highlights, names, hourly, segments)
 
+        // Chunks still recording, queued, or away at the batch pipeline. The
+        // engine buckets DONE, SILENT and FAILED but counts every chunk in the
+        // total, so without this a day whose audio has not finished transcribing
+        // is written up as "no speech detected, 0 words" -- and stored as final.
+        // The column and its migration have existed for this since schema 2 with
+        // nothing ever writing to them; the batch backend makes it the normal
+        // case rather than an edge one, because at 23:00 the evening's
+        // transcripts genuinely have not come back yet.
+        val unsettled = db.chunkDao().unsettledBetween(from, to)
+        val bodyWithCaveat = if (unsettled > 0) {
+            buildString {
+                append(body)
+                append("\n\n_")
+                append(
+                    if (unsettled == 1) "1 recording is still being transcribed, "
+                    else "$unsettled recordings are still being transcribed, "
+                )
+                append("so this is incomplete and will be rewritten._")
+            }
+        } else {
+            body
+        }
+
         val entity = SummaryEntity(
             dayEpochDay = date.toEpochDay(),
             generatedAt = System.currentTimeMillis(),
             headline = headline,
-            bodyMarkdown = body,
+            bodyMarkdown = bodyWithCaveat,
             statsJson = json.encodeToString(DayStats.serializer(), stats),
+            provisional = unsettled > 0,
         )
         db.summaryDao().upsert(entity)
         Log.i(TAG, "summary for $date: $headline")
