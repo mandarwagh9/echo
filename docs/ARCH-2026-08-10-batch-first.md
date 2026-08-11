@@ -255,3 +255,45 @@ evidence justified. The cost of being wrong is the only copy of someone's day.
 So it wants a deliberate decision, not an inference — and it should be made after
 step 2, not before, because if Chirp 3 does not hold up on real room audio then
 the question is moot and the existing path stays.
+
+---
+
+## 11. Every consumer of `status` and `audioHold`, checked against `UPLOADED`
+
+Adding one state to a state machine with a dozen implicit consumers produced six
+bugs, found one per pass over several days, each in the seam between the new code
+and an old invariant rather than in the new code itself. This is the sweep that
+should have happened first. It is recorded so the next person adding a state has
+the list rather than the archaeology.
+
+`UPLOADED` is **not terminal** (work remains, elsewhere) and **not claimable**
+(`nextClaimableId` takes only `PENDING`). It holds `AudioHold.AWAITING_REMOTE`.
+
+| Consumer | Behaviour with `UPLOADED` | |
+|---|---|---|
+| `nextClaimableId` — `PENDING` only | not claimed by the worker | correct |
+| `requeueStale` — `TRANSCRIBING` only | untouched | correct |
+| `recoverAbandonedRecording` — `RECORDING` | untouched | correct |
+| `pendingCount` — `PENDING`/`TRANSCRIBING` | excluded — invisible on Today | **fixed**: separate counter |
+| `failedChunks`, `retryAllFailed`, `discardFailedWithoutAudio` — `FAILED` | out of reach of "Retry failed" | **fixed**: `reclaimStuckUploads` |
+| `requeueRedoable` — `DONE`/`SILENT` + holds | out of reach of "Redo" | same fix |
+| `tradeableAudio` — `DONE`/`SILENT` + `DEGRADED` | its audio can never be traded | **fixed**: cap checked before upload |
+| `retainedAudioBytes` — status-agnostic, any non-`UNLINK_PENDING` hold | **counts it** — pressure reads true | correct as written |
+| `releasableLeftovers` — `UNLINK_PENDING` | never carries that marker | correct |
+| `chunksWithAudio` — `filePath IS NOT NULL` | audio safe from the orphan sweep | correct |
+| `unsettledBetween` — `RECORDING`/`PENDING`/`TRANSCRIBING` | day looked settled when it was not | **fixed**: `UPLOADED` added |
+| `outstandingChunkId` — `SUBMITTED` job on a `PENDING`/`TRANSCRIBING` chunk | cannot block other chunks | correct |
+| `settle` → `clearForChunk` when `isTerminal` | stale `cloud_jobs` survive the hand-off | **fixed**: cleared explicitly |
+| Model gate — `modelFile == null && !cloudSelected` | pipeline dead with no local model | **fixed**: "transcribes elsewhere" |
+| `SummaryEngine` buckets `DONE`/`SILENT`/`FAILED` | counted in the total, in no bucket | **fixed**: provisional wired |
+
+Two of those came back clean, and that is worth as much as the fixes:
+`retainedAudioBytes` is status-agnostic, so disk pressure reads correctly without
+help, and `chunksWithAudio` keys on `filePath` rather than status, so an
+uploaded chunk's recording is never mistaken for an orphan and deleted.
+
+**The generalisation.** Every one of these bugs came from a query that named the
+states it *wanted* rather than the property it *meant*. `!cloudSelected` meant
+"has no remote transcriber". `status IN ('DONE','SILENT')` meant "settled".
+Enumerating states is correct until someone adds one, and this state machine now
+has eight. Where a predicate can be phrased as the property, it should be.

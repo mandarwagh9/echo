@@ -406,6 +406,15 @@ class TranscriptionPipeline(
         return when (val result = uploader.upload(file, chunk.startedAt)) {
             is GcsUploader.Result.Uploaded -> {
                 Log.i(TAG, "chunk ${chunk.id} uploaded as ${result.objectName}")
+                // The chunk's cloud attempt is over -- it is being transcribed by
+                // something else now. settle() only clears these rows for a
+                // terminal status, and UPLOADED deliberately is not one, so they
+                // would otherwise outlive the attempt they describe. That matters
+                // because nextClaimableId orders by outstanding SUBMITTED jobs:
+                // a chunk later requeued by reclaimStuckUploads would jump the
+                // queue on the strength of a server job that no longer exists.
+                runCatching { db.cloudJobDao().clearForChunk(chunk.id) }
+                    .onFailure { Log.w(TAG, "could not clear cloud jobs for ${chunk.id}", it) }
                 settle(
                     chunk = chunk,
                     lease = lease,
