@@ -1,7 +1,8 @@
 package com.mandar.echo.stt
 
 import android.util.Log
-import com.mandar.echo.data.EchoDatabase
+import com.mandar.echo.data.ChunkDao
+import com.mandar.echo.data.SegmentDao
 import com.mandar.echo.data.SegmentEntity
 import com.mandar.echo.data.Settings
 import org.json.JSONObject
@@ -27,7 +28,9 @@ private const val TAG = "BatchSync"
  * most polls happen before the answer exists.
  */
 internal class BatchSync(
-    private val db: EchoDatabase,
+    private val chunkDao: ChunkDao,
+    private val segmentDao: SegmentDao,
+    private val transcriptDao: com.mandar.echo.data.TranscriptDao,
     private val postJson: suspend (url: String, apiKey: String, body: String) -> UploadReply,
 ) {
 
@@ -40,7 +43,7 @@ internal class BatchSync(
     suspend fun run(cfg: Settings): Int {
         if (cfg.uploadUrl.isBlank() || cfg.uploadKey.isBlank()) return 0
 
-        val waiting = runCatching { db.chunkDao().uploadedChunks(BATCH) }
+        val waiting = runCatching { chunkDao.uploadedChunks(BATCH) }
             .getOrElse {
                 Log.e(TAG, "could not read uploaded chunks", it)
                 return 0
@@ -94,9 +97,9 @@ internal class BatchSync(
             }
 
             runCatching {
-                db.transcriptDao().commitRemote(
-                    chunkDao = db.chunkDao(),
-                    segmentDao = db.segmentDao(),
+                transcriptDao.commitRemote(
+                    chunkDao = chunkDao,
+                    segmentDao = segmentDao,
                     chunkId = chunk.id,
                     segments = segments,
                     wordCount = words,

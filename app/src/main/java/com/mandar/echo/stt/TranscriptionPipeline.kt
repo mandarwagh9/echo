@@ -323,7 +323,9 @@ class TranscriptionPipeline(
         data class Fail(val reason: String) : Attempt
     }
 
-    private val batchSync by lazy { BatchSync(db, uploadTransport::mint) }
+    private val batchSync by lazy {
+        BatchSync(db.chunkDao(), db.segmentDao(), db.transcriptDao(), uploadTransport::mint)
+    }
 
     /**
      * Ask the batch pipeline for transcripts of chunks this device uploaded.
