@@ -119,6 +119,19 @@ abstract class ChunkDao {
     abstract suspend fun pendingCountNow(): Int
 
     /**
+     * Chunks the batch pipeline has and this device is waiting on.
+     *
+     * Deliberately not folded into [pendingCount]. "In queue" means work this
+     * phone will do; this is work happening somewhere else, and the two want
+     * different words on screen. Counted at all because an uploaded chunk is
+     * otherwise invisible -- not queued, not transcribed, not failed -- and a
+     * recorder whose state cannot be seen is how eighteen chunks once sat in
+     * silence with nothing on screen to say so.
+     */
+    @Query("SELECT COUNT(*) FROM chunks WHERE status = 'UPLOADED'")
+    abstract fun awaitingRemoteCount(): Flow<Int>
+
+    /**
      * Work the loop can actually start right now.
      *
      * Distinct from [pendingCountNow], which feeds the UI badge. Gating the loop on

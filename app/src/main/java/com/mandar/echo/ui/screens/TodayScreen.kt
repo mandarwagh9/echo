@@ -55,6 +55,7 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
     val levels by vm.levels.collectAsStateWithLifecycle()
     val sessionStart by vm.sessionStartedAt.collectAsStateWithLifecycle()
     val pending by vm.pendingCount.collectAsStateWithLifecycle()
+    val awaiting by vm.awaitingRemote.collectAsStateWithLifecycle()
     val pipeline by vm.pipelineState.collectAsStateWithLifecycle()
     val segments by vm.segmentsForDay.collectAsStateWithLifecycle()
     val chunks by vm.chunksForDay.collectAsStateWithLifecycle()
@@ -226,6 +227,33 @@ fun TodayScreen(vm: EchoViewModel, onOpenSettings: () -> Unit) {
 
         pipeline.lastError?.let { error ->
             Notice(title = "Transcription problem", body = error)
+        }
+
+        // Chunks the batch pipeline has and this device is waiting on. Without a
+        // line for it, a day recorded on the batch backend reads as "0 words, —
+        // in queue" while everything is in fact in flight -- which is the same
+        // invisible-state failure as a silent park, arrived at from the other
+        // direction.
+        if (awaiting > 0) {
+            Spacer(Modifier.height(20.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                SectionLabel("Transcribing elsewhere")
+                Text(
+                    if (awaiting == 1) "1 recording" else "$awaiting recordings",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.muted,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Uploaded and waiting on the batch pipeline. The audio stays on " +
+                    "this phone until the words come back.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.faint,
+            )
         }
 
         // A park is a normal state of a recorder that lives on hotel wifi, but an

@@ -64,6 +64,10 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     val redoableChunks: StateFlow<Int> = echo.db.chunkDao().redoableCount(AudioHold.REDOABLE)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    /** Chunks handed to the batch pipeline whose transcripts have not returned. */
+    val awaitingRemote: StateFlow<Int> = echo.db.chunkDao().awaitingRemoteCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     private val _levels = MutableStateFlow<List<Float>>(emptyList())
     val levels: StateFlow<List<Float>> = _levels
 

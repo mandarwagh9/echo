@@ -168,6 +168,9 @@ internal class FakeChunkDao : ChunkDao() {
         rows[id]?.let { rows[id] = it.copy(endedAt = endedAt, sampleCount = sampleCount, status = status) }
     }
 
+    override fun awaitingRemoteCount(): kotlinx.coroutines.flow.Flow<Int> =
+        kotlinx.coroutines.flow.flowOf(rows.values.count { it.status == ChunkStatus.UPLOADED })
+
     /** Mirrors the WHERE clause: only UPLOADED rows, oldest first. */
     override suspend fun uploadedChunks(limit: Int): List<ChunkEntity> =
         rows.values
