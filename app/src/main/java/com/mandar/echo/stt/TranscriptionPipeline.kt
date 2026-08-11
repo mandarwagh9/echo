@@ -229,10 +229,15 @@ class TranscriptionPipeline(
         // check used to run unconditionally, so with the cloud selected and no
         // local model installed the pipeline returned here every time and nothing
         // was ever transcribed — chunks closed correctly and simply piled up.
-        val cloudSelected = usesCloud(cfg)
+        // Any backend that transcribes elsewhere, not just CLOUD. The batch
+        // backend needs a local model exactly as little as the server does, and
+        // gating it on one reproduces the bug the comment above describes --
+        // chunks closing correctly and piling up for ever with nothing able to
+        // run, which is precisely how eleven chunks once reached zero words.
+        val remoteSelected = usesCloud(cfg) || usesBatch(cfg)
         val modelFile = models.resolveInstalledOrNull(cfg.modelFile)
 
-        if (modelFile == null && !cloudSelected) {
+        if (modelFile == null && !remoteSelected) {
             _state.value = _state.value.copy(
                 modelReady = false,
                 lastError = "No speech model installed",
@@ -244,7 +249,7 @@ class TranscriptionPipeline(
             (!engine.isLoaded || engine.modelPath != modelFile.absolutePath)
         ) {
             val loaded = engine.load(modelFile)
-            if (loaded.isFailure && !cloudSelected) {
+            if (loaded.isFailure && !remoteSelected) {
                 _state.value = _state.value.copy(
                     modelReady = false,
                     lastError = loaded.exceptionOrNull()?.message,
@@ -253,7 +258,7 @@ class TranscriptionPipeline(
                 return false
             }
         }
-        _state.value = _state.value.copy(modelReady = engine.isLoaded || cloudSelected)
+        _state.value = _state.value.copy(modelReady = engine.isLoaded || remoteSelected)
 
         // Silero VAD is deliberately NOT enabled here, despite the plumbing being
         // in place and working. Measured on the Indic fixtures, turning it on made
@@ -480,9 +485,30 @@ class TranscriptionPipeline(
             // which is the one thing the object name exists to establish. Both
             // silence gates above still apply, so a quiet chunk is never uploaded
             // at all, and that is where the saving actually comes from.
-            if (cfg.sttBackend == SttBackend.BATCH) {
+            val underPressure = underAudioPressure()
+
+            if (usesBatch(cfg)) {
                 val gatedMs = voiced.samples.size * 1000L / AudioFormatSpec.SAMPLE_RATE
-                return handOffToBatch(chunk, lease, attempts, cfg, file, vad.speechRatio, gatedMs)
+                when {
+                    !underPressure ->
+                        return handOffToBatch(chunk, lease, attempts, cfg, file, vad.speechRatio, gatedMs)
+
+                    // Over the cap. An uploaded chunk holds AWAITING_REMOTE, and
+                    // the disk valve may only trade DEGRADED -- so uploading more
+                    // adds audio nothing is allowed to release, and the backlog
+                    // can only grow. Same trade the cloud path makes here: a
+                    // degraded transcript beats no recording.
+                    models.resolveInstalledOrNull(cfg.modelFile) != null ->
+                        Log.w(TAG, "chunk ${chunk.id}: held audio over cap; using the on-device engine")
+
+                    // Nothing local to fall back to. Park rather than upload:
+                    // holding still is what lets the return leg catch up, and the
+                    // storage guard owns the endgame if it never does.
+                    else -> {
+                        park(chunk, "waiting for transcripts; held audio is over the cap", PARK_LONG_MS)
+                        return false
+                    }
+                }
             }
 
             val levelled = AudioGain.normalize(voiced.samples)
@@ -494,8 +520,6 @@ class TranscriptionPipeline(
                     "${"%.1f".format(samples.size / 16_000f)} s to transcribe " +
                     "(rms=${"%.4f".format(levelled.inputRms)}, gain=${"%.1f".format(levelled.gain)}x)",
             )
-
-            val underPressure = underAudioPressure()
 
             return when (val attempt = runBackends(chunk, cfg, levelled.samples, voicedMs, underPressure)) {
                 is Attempt.Park -> {
@@ -1170,6 +1194,12 @@ class TranscriptionPipeline(
     }
 
     // ---- helpers -------------------------------------------------------------
+
+    /** The batch pipeline is usable: selected, and pointed at a service. */
+    private fun usesBatch(cfg: Settings): Boolean =
+        cfg.sttBackend == SttBackend.BATCH &&
+            cfg.uploadUrl.startsWith("http") &&
+            cfg.uploadKey.isNotBlank()
 
     private fun usesCloud(cfg: Settings): Boolean =
         cfg.sttBackend == SttBackend.CLOUD &&
