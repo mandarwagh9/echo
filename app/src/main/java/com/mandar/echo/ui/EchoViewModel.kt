@@ -189,6 +189,11 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** The batch pipeline's upload service. Blank falls back to the build default. */
+    fun setUploadService(url: String, key: String) {
+        viewModelScope.launch { echo.settings.setUploadService(url, key) }
+    }
+
     /** What the build was compiled with, so the UI can say whether it is overridden. */
     fun buildDefaultServer(): Pair<String, String> =
         com.mandar.echo.BuildConfig.STT_URL.trim().trimEnd('/') to

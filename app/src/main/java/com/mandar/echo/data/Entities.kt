@@ -30,7 +30,24 @@ import androidx.room.PrimaryKey
  * that the audio is expendable. (TranscriptionPipeline.reconcileOrphanAudio also
  * deletes files, but only ones no row points at, so it unlinks nothing.)
  */
-enum class ChunkStatus { RECORDING, PENDING, TRANSCRIBING, DONE, SILENT, FAILED, DISCARDED }
+enum class ChunkStatus {
+    RECORDING, PENDING, TRANSCRIBING, DONE, SILENT, FAILED, DISCARDED,
+
+    /**
+     * Handed to the batch pipeline and waiting for its transcript to come back.
+     *
+     * Not terminal, because the work is not finished -- only relocated. The audio
+     * is still held on this device: an upload proves a second copy exists in the
+     * bucket, not that anything has read it, and the bucket's own lifecycle rule
+     * will delete that copy on a timer regardless. Releasing the WAV here would
+     * trade the only recording of an hour against a transcript that may never
+     * arrive.
+     *
+     * Deliberately not claimable: `nextClaimableId` only takes PENDING, so an
+     * uploaded chunk is not picked up again by the local worker.
+     */
+    UPLOADED,
+}
 
 /**
  * No worker will claim this chunk again without the user asking for it.
@@ -52,6 +69,9 @@ object TranscriptSource {
 
     /** The server refused part of the chunk and the on-device engine covered that part. */
     const val MIXED = "mixed"
+
+    /** Chirp 3 via the batch pipeline: 1.00 on both Hindi and Marathi fixtures. */
+    const val GCS_BATCH = "gcs-batch"
 }
 
 /**
@@ -91,6 +111,21 @@ object AudioHold {
      * exists, so releasing the audio costs accuracy rather than the recording.
      */
     const val DEGRADED = "transcribed on device while the server was unavailable"
+
+    /**
+     * Uploaded to the batch pipeline; the transcript has not come back yet.
+     *
+     * The invariant is unchanged, which is the whole point of spelling this out:
+     * audio is released when a transcript is *stored*, never merely when a copy
+     * of the audio exists elsewhere. An upload is not a transcript. The bucket
+     * deletes its copy on a one-day lifecycle whether or not anything read it,
+     * so treating the upload as permission to unlink here would put a day's
+     * recording behind a timer nobody is watching.
+     *
+     * Cleared by the sync that writes the returned segments, at which point the
+     * ordinary release path applies.
+     */
+    const val AWAITING_REMOTE = "uploaded; waiting for its transcript"
 
     /** Every attempt failed, so the user's retry has something to work with. */
     const val FAILED = "failed; kept so it can be retried"

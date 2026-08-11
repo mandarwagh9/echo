@@ -27,13 +27,14 @@ import os
 import google.auth
 import google.auth.transport.requests
 from flask import Flask, jsonify, request
-from google.cloud import storage
+from google.cloud import firestore, storage
 
 app = Flask(__name__)
 
 PROJECT = os.environ.get("ECHO_PROJECT", "agentbillboard")
 BUCKET = os.environ.get("ECHO_INGEST_BUCKET", "agentbillboard-echo-ingest")
 API_KEY = os.environ.get("ECHO_UPLOAD_KEY", "")
+FIRESTORE_DB = os.environ.get("ECHO_FIRESTORE_DB", "echo")
 URL_TTL = datetime.timedelta(minutes=int(os.environ.get("ECHO_URL_TTL_MIN", "60")))
 
 # A 10-minute chunk of 16 kHz mono PCM is 19.2 MB. The ceiling is generous
@@ -106,6 +107,55 @@ def upload_url():
         access_token=token,
     )
     return jsonify(url=url, object=name, bucket=BUCKET, expiresInSeconds=int(URL_TTL.total_seconds()))
+
+
+@app.post("/v1/segments")
+def segments():
+    """Return the transcripts for named objects, if they exist yet.
+
+    Exact match on object name rather than a time window, and a POST rather than
+    a GET, for the same reason: the phone knows precisely which chunks it is
+    waiting for, and asking for those is not a query that can drift, need an
+    index, or quietly miss a late arrival because it fell outside a window.
+
+    A missing object is simply absent from the reply. That is the normal case --
+    dynamic batching means most requests arrive before the transcript does --
+    and it must be cheap and unremarkable rather than an error.
+    """
+    if not API_KEY or request.headers.get("X-Echo-Key") != API_KEY:
+        return jsonify(error="unauthorized"), 401
+
+    body = request.get_json(silent=True) or {}
+    names = body.get("objects")
+    if not isinstance(names, list) or not names:
+        return jsonify(error="objects must be a non-empty array of object names"), 400
+    if len(names) > 200:
+        return jsonify(error="at most 200 objects per request"), 400
+
+    uris = [f"gs://{BUCKET}/{str(n).lstrip('/')}" for n in names]
+
+    db = firestore.Client(project=PROJECT, database=FIRESTORE_DB)
+    found: dict[str, list[dict]] = {}
+    # Firestore caps an `in` filter at 30 values.
+    for i in range(0, len(uris), 30):
+        window = uris[i:i + 30]
+        query = db.collection("echo_segments").where(
+            filter=firestore.FieldFilter("sourceUri", "in", window)
+        )
+        for doc in query.stream():
+            row = doc.to_dict()
+            uri = row.get("sourceUri", "")
+            found.setdefault(uri.rsplit("/", 1)[-1] if uri else "", []).append({
+                "text": row.get("text", ""),
+                "language": row.get("language", ""),
+                "startMs": row.get("startMs", 0),
+                "endMs": row.get("endMs", 0),
+                "startedAt": row.get("startedAt"),
+            })
+
+    for segs in found.values():
+        segs.sort(key=lambda s: s["startMs"])
+    return jsonify(segments=found)
 
 
 if __name__ == "__main__":

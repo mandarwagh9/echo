@@ -249,6 +249,38 @@ abstract class ChunkDao {
         notBefore: Long,
     ): Int
 
+    /**
+     * Land a chunk whose transcript arrived from the batch pipeline.
+     *
+     * Clears `audioHold` in the same statement that sets the status: the hold
+     * said "waiting for its transcript", and that is now false. Releasing the
+     * WAV itself is left to the ordinary sweep, which is the only thing that
+     * unlinks files.
+     */
+    @Query(
+        "UPDATE chunks SET status = :status, wordCount = :wordCount, " +
+            "coveredMs = :coveredMs, audioHold = NULL, error = NULL " +
+            "WHERE id = :id AND status = 'UPLOADED'"
+    )
+    abstract suspend fun completeRemote(
+        id: Long,
+        status: ChunkStatus,
+        wordCount: Int,
+        coveredMs: Long,
+    ): Int
+
+    /**
+     * Chunks handed to the batch pipeline whose transcripts have not come back.
+     *
+     * Oldest first, and deliberately not lease-aware: an UPLOADED chunk is not
+     * claimable by the worker, so nothing else is competing for it.
+     */
+    @Query(
+        "SELECT * FROM chunks WHERE status = 'UPLOADED' " +
+            "ORDER BY startedAt ASC LIMIT :limit"
+    )
+    abstract suspend fun uploadedChunks(limit: Int): List<ChunkEntity>
+
     @Query("UPDATE chunks SET status = :status WHERE id = :id")
     abstract suspend fun setStatus(id: Long, status: ChunkStatus)
 
@@ -408,6 +440,37 @@ interface SummaryDao {
 /** Groups the writes that must not be observable out of order. */
 @Dao
 abstract class TranscriptDao {
+
+    /**
+     * Commit a transcript that arrived out of band, from the batch pipeline.
+     *
+     * Not lease-conditional, unlike [settle], because there is no lease to hold:
+     * an UPLOADED chunk was released by the worker when it was handed off, and
+     * `nextClaimableId` only takes PENDING, so nothing else can be writing to it.
+     *
+     * One transaction, because the two writes must not be observable apart. A
+     * chunk that reached DONE without its segments would have its audio released
+     * by the ordinary path and its words lost with it -- and the audio is the
+     * only copy, because the bucket deletes its own on a lifecycle timer.
+     */
+    @Transaction
+    open suspend fun commitRemote(
+        chunkDao: ChunkDao,
+        segmentDao: SegmentDao,
+        chunkId: Long,
+        segments: List<SegmentEntity>,
+        wordCount: Int,
+        coveredMs: Long,
+    ) {
+        segmentDao.deleteForChunk(chunkId)
+        if (segments.isNotEmpty()) segmentDao.insertAll(segments)
+        chunkDao.completeRemote(
+            id = chunkId,
+            status = if (segments.isEmpty()) ChunkStatus.SILENT else ChunkStatus.DONE,
+            wordCount = wordCount,
+            coveredMs = coveredMs,
+        )
+    }
 
     /**
      * Writes everything a finished run owns — its segments, the chunk's new status

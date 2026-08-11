@@ -40,6 +40,16 @@ enum class SttLanguage(val code: String, val label: String) {
 enum class SttBackend(val label: String, val note: String) {
     ON_DEVICE("On device", "Private, works offline. Weak on Hindi/Marathi"),
     CLOUD("Your server", "Accurate on Hindi/Marathi. Audio leaves the phone"),
+
+    /**
+     * Upload to the batch pipeline and let Chirp 3 transcribe it there.
+     *
+     * The trade against [CLOUD] is latency for everything else: no self-hosted
+     * model to keep warm, no 300 s cap to split chunks around, no job to lose,
+     * and about a fifth of the cost. The transcript arrives later rather than
+     * within a poll, which a journal read in the evening can afford.
+     */
+    BATCH("Batch (Chirp 3)", "Cheapest and most accurate. Audio leaves the phone"),
 }
 
 data class Settings(
@@ -49,6 +59,9 @@ data class Settings(
     /** Base URL of a vexyl-stt server, e.g. https://vexyl-stt-xxxx.run.app */
     val sttServerUrl: String = "",
     val sttApiKey: String = "",
+    /** Base URL of the echo-upload service, e.g. https://echo-upload-xxxx.run.app */
+    val uploadUrl: String = "",
+    val uploadKey: String = "",
     val language: SttLanguage = SttLanguage.AUTO,
     /** MediaRecorder.AudioSource. MIC is correct for far-field ambient capture. */
     val audioSource: Int = MediaRecorder.AudioSource.MIC,
@@ -75,6 +88,8 @@ class EchoSettings(private val context: Context) {
         val BACKEND = stringPreferencesKey("stt_backend")
         val SERVER_URL = stringPreferencesKey("stt_server_url")
         val API_KEY = stringPreferencesKey("stt_api_key")
+        val UPLOAD_URL = stringPreferencesKey("upload_url")
+        val UPLOAD_KEY = stringPreferencesKey("upload_key")
     }
 
     val flow: Flow<Settings> = context.dataStore.data.map { p ->
@@ -88,6 +103,9 @@ class EchoSettings(private val context: Context) {
             sttServerUrl = (p[Keys.SERVER_URL] ?: com.mandar.echo.BuildConfig.STT_URL)
                 .trim().trimEnd('/'),
             sttApiKey = p[Keys.API_KEY] ?: com.mandar.echo.BuildConfig.STT_KEY,
+            uploadUrl = (p[Keys.UPLOAD_URL] ?: com.mandar.echo.BuildConfig.UPLOAD_URL)
+                .trim().trimEnd('/'),
+            uploadKey = p[Keys.UPLOAD_KEY] ?: com.mandar.echo.BuildConfig.UPLOAD_KEY,
             language = SttLanguage.fromCode(p[Keys.LANGUAGE] ?: "auto"),
             audioSource = p[Keys.SOURCE] ?: MediaRecorder.AudioSource.MIC,
             summaryHour = p[Keys.HOUR] ?: 23,
@@ -120,6 +138,14 @@ class EchoSettings(private val context: Context) {
         val k = apiKey.trim()
         if (u.isEmpty()) p.remove(Keys.SERVER_URL) else p[Keys.SERVER_URL] = u
         if (k.isEmpty()) p.remove(Keys.API_KEY) else p[Keys.API_KEY] = k
+    }
+
+    /** Blank falls back to the build-time default; see [setSttServer]. */
+    suspend fun setUploadService(url: String, key: String) = edit { p ->
+        val u = url.trim().trimEnd('/')
+        val k = key.trim()
+        if (u.isEmpty()) p.remove(Keys.UPLOAD_URL) else p[Keys.UPLOAD_URL] = u
+        if (k.isEmpty()) p.remove(Keys.UPLOAD_KEY) else p[Keys.UPLOAD_KEY] = k
     }
 
     suspend fun setLanguage(language: SttLanguage) = edit { it[Keys.LANGUAGE] = language.code }

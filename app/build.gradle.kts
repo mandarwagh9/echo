@@ -40,6 +40,16 @@ android {
             "String", "STT_KEY",
             "\"${localProps.getProperty("echo.stt.key", "")}\"",
         )
+        // The batch pipeline's signed-URL minting service. Same rule: absent
+        // values compile to empty strings and the backend simply cannot be used.
+        buildConfigField(
+            "String", "UPLOAD_URL",
+            "\"${localProps.getProperty("echo.upload.url", "")}\"",
+        )
+        buildConfigField(
+            "String", "UPLOAD_KEY",
+            "\"${localProps.getProperty("echo.upload.key", "")}\"",
+        )
 
         ndk {
             // arm64-v8a is the only ABI a real phone needs. x86_64 is here purely

@@ -140,6 +140,9 @@ class TranscriptionPipeline(
     private val appContext = context.applicationContext
     private val gate = CloudGate(appContext)
 
+    /** Socket half of the batch upload; an interface so the loop is testable. */
+    private val uploadTransport: UploadTransport = HttpUploadTransport()
+
     private val _state = MutableStateFlow(PipelineState())
     val state: StateFlow<PipelineState> = _state
 
@@ -177,6 +180,12 @@ class TranscriptionPipeline(
 
             while (isActive) {
                 runCatching { sweepStaleClaims() }
+                // The batch backend's return leg. Cheap when there is nothing
+                // waiting -- it is a local query that finds no rows -- and it has
+                // to run here rather than on its own timer, because a chunk that
+                // never gets its transcript never releases its audio.
+                runCatching { collectBatchTranscripts() }
+                    .onFailure { Log.e(TAG, "batch transcript sync failed", it) }
                 val worked = runCatching { processNext() }
                     .onFailure { Log.e(TAG, "pipeline iteration failed", it) }
                     .getOrDefault(false)
@@ -314,6 +323,91 @@ class TranscriptionPipeline(
         data class Fail(val reason: String) : Attempt
     }
 
+    private val batchSync by lazy { BatchSync(db, uploadTransport::mint) }
+
+    /**
+     * Ask the batch pipeline for transcripts of chunks this device uploaded.
+     *
+     * Runs on every loop iteration regardless of backend, deliberately: a user
+     * who uploads a day's audio and then switches back to on-device would
+     * otherwise strand those chunks in UPLOADED for ever, holding their WAVs and
+     * waiting for a poll that no longer happens.
+     */
+    private suspend fun collectBatchTranscripts() {
+        val cfg = settings.current()
+        if (cfg.uploadUrl.isBlank() || cfg.uploadKey.isBlank()) return
+        val done = batchSync.run(cfg)
+        if (done > 0) Log.i(TAG, "batch pipeline returned $done transcript(s)")
+    }
+
+    /**
+     * Hand one chunk to the batch pipeline and stop there.
+     *
+     * The chunk lands in [ChunkStatus.UPLOADED] holding
+     * [AudioHold.AWAITING_REMOTE], which keeps its WAV. That is deliberate and
+     * is the whole safety argument for this backend: an upload proves a second
+     * copy exists in a bucket, not that anything has transcribed it, and the
+     * bucket deletes its copy on a lifecycle timer either way. The rule the rest
+     * of this file enforces -- audio is released when a transcript is *stored* --
+     * is left exactly as it was. The sync that writes the returned segments is
+     * what clears the hold.
+     *
+     * A configuration problem parks long rather than failing, for the same
+     * reason the cloud path does: burning attempts against a missing setting
+     * retires a chunk that nothing was ever wrong with.
+     */
+    private suspend fun handOffToBatch(
+        chunk: ChunkEntity,
+        lease: Long,
+        attempts: Int,
+        cfg: Settings,
+        file: File,
+        speechRatio: Float,
+        voicedMs: Long,
+    ): Boolean {
+        if (cfg.uploadUrl.isBlank() || cfg.uploadKey.isBlank()) {
+            park(chunk, "batch upload service is not configured", PARK_LONG_MS)
+            return false
+        }
+
+        val uploader = GcsUploader(
+            transport = uploadTransport,
+            mintUrl = "${cfg.uploadUrl}/v1/upload-url",
+            apiKey = cfg.uploadKey,
+        )
+
+        return when (val result = uploader.upload(file, chunk.startedAt)) {
+            is GcsUploader.Result.Uploaded -> {
+                Log.i(TAG, "chunk ${chunk.id} uploaded as ${result.objectName}")
+                settle(
+                    chunk = chunk,
+                    lease = lease,
+                    status = ChunkStatus.UPLOADED,
+                    attempts = attempts,
+                    hold = AudioHold.AWAITING_REMOTE,
+                    // null, not emptyList(): passing a list would delete the
+                    // chunk's existing segments, and a redo of an already
+                    // transcribed chunk would destroy the text it already had.
+                    segments = null,
+                    speechRatio = speechRatio,
+                    transcriptSource = TranscriptSource.GCS_BATCH,
+                    voicedMs = voicedMs,
+                )
+                true
+            }
+
+            is GcsUploader.Result.Retry -> {
+                park(chunk, result.reason, PARK_MEDIUM_MS)
+                false
+            }
+
+            is GcsUploader.Result.Halt -> {
+                park(chunk, result.reason, PARK_LONG_MS)
+                false
+            }
+        }
+    }
+
     private suspend fun transcribeChunk(
         chunk: ChunkEntity,
         lease: Long,
@@ -375,6 +469,18 @@ class TranscriptionPipeline(
             if (voiced.isEmpty) {
                 Log.i(TAG, "chunk ${chunk.id} has no voiced regions after gating")
                 return commitSilent(chunk, lease, attempts, vad.speechRatio, file, cfg)
+            }
+
+            // The batch backend's unit of work is the chunk file itself, not the
+            // voiced stream. Uploading the compacted audio would be cheaper, but
+            // Chirp 3 returns offsets relative to whatever it was given, and
+            // against a compacted stream those stop mapping to wall-clock time --
+            // which is the one thing the object name exists to establish. Both
+            // silence gates above still apply, so a quiet chunk is never uploaded
+            // at all, and that is where the saving actually comes from.
+            if (cfg.sttBackend == SttBackend.BATCH) {
+                val gatedMs = voiced.samples.size * 1000L / AudioFormatSpec.SAMPLE_RATE
+                return handOffToBatch(chunk, lease, attempts, cfg, file, vad.speechRatio, gatedMs)
             }
 
             val levelled = AudioGain.normalize(voiced.samples)

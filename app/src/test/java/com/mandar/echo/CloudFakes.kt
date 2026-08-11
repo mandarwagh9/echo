@@ -168,6 +168,35 @@ internal class FakeChunkDao : ChunkDao() {
         rows[id]?.let { rows[id] = it.copy(endedAt = endedAt, sampleCount = sampleCount, status = status) }
     }
 
+    /** Mirrors the WHERE clause: only UPLOADED rows, oldest first. */
+    override suspend fun uploadedChunks(limit: Int): List<ChunkEntity> =
+        rows.values
+            .filter { it.status == ChunkStatus.UPLOADED }
+            .sortedBy { it.startedAt }
+            .take(limit)
+
+    /**
+     * Faithful to the statement, including `AND status = 'UPLOADED'` — a fake
+     * that ignored that guard would hide a double-commit rather than catch it.
+     */
+    override suspend fun completeRemote(
+        id: Long,
+        status: ChunkStatus,
+        wordCount: Int,
+        coveredMs: Long,
+    ): Int {
+        val row = rows[id] ?: return 0
+        if (row.status != ChunkStatus.UPLOADED) return 0
+        rows[id] = row.copy(
+            status = status,
+            wordCount = wordCount,
+            coveredMs = coveredMs,
+            audioHold = null,
+            error = null,
+        )
+        return 1
+    }
+
     override suspend fun nextClaimableId(now: Long): Long? =
         rows.values
             .filter { it.status == ChunkStatus.PENDING && it.notBefore <= now }

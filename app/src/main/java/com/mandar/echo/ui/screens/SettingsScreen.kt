@@ -269,6 +269,61 @@ fun SettingsScreen(vm: EchoViewModel) {
             )
         }
 
+        if (settings.sttBackend == SttBackend.BATCH) {
+            Spacer(Modifier.height(18.dp))
+
+            var upUrlDraft by remember(settings.uploadUrl) { mutableStateOf(settings.uploadUrl) }
+            var upKeyDraft by remember(settings.uploadKey) { mutableStateOf(settings.uploadKey) }
+            var revealUpKey by rememberSaveable { mutableStateOf(false) }
+
+            SectionLabel("Upload service")
+            Spacer(Modifier.height(8.dp))
+            EchoTextField(
+                value = upUrlDraft,
+                onValueChange = { upUrlDraft = it },
+                placeholder = "https://echo-upload-....run.app",
+                keyboardType = KeyboardType.Uri,
+            )
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("Upload key")
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                EchoTextField(
+                    value = upKeyDraft,
+                    onValueChange = { upKeyDraft = it },
+                    placeholder = "not set",
+                    masked = !revealUpKey,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(10.dp))
+                PillButton(if (revealUpKey) "Hide" else "Show") { revealUpKey = !revealUpKey }
+            }
+
+            val upDirty = upUrlDraft != settings.uploadUrl || upKeyDraft != settings.uploadKey
+            val upWrong = upUrlDraft.isNotBlank() && !upUrlDraft.startsWith("http")
+            Spacer(Modifier.height(14.dp))
+            PillButton("Save", filled = true, enabled = upDirty && !upWrong) {
+                vm.setUploadService(upUrlDraft, upKeyDraft)
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                when {
+                    upWrong -> "A service URL has to start with http:// or https://."
+                    upUrlDraft.isBlank() ->
+                        "No upload service set, so this backend cannot run — recordings " +
+                            "will queue and keep their audio rather than being transcribed."
+                    else ->
+                        "Chunks are uploaded whole and transcribed in batches, so a " +
+                            "transcript can take a while to appear. Until it does, the " +
+                            "recording is kept on this phone: an upload proves a copy " +
+                            "reached the bucket, not that anything has read it."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.muted,
+            )
+        }
+
         // ---- language ------------------------------------------------------
 
         Group("Language")
