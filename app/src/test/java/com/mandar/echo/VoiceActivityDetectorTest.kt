@@ -71,6 +71,40 @@ class VoiceActivityDetectorTest {
     }
 
     @Test
+    fun `a fragment at a chunk boundary is kept, the same fragment in the middle is not`() {
+        // Chunking cuts the day at a fixed interval, not at pauses, so a sentence
+        // spanning a boundary leaves a ~500 ms tail in one file and a head in the
+        // next. Judged by a duration it was cut out of, that tail is under the 1 s
+        // bar and its WAV is released -- and at the 1-minute chunk length currently
+        // configured, boundaries come round sixty times an hour.
+        val rng = Random(5)
+        fun chunkWith(fragmentAt: Int): FloatArray {
+            val samples = FloatArray(oneMinute) { (rng.nextFloat() - 0.5f) * 0.0006f }
+            for (i in 0 until AudioFormatSpec.SAMPLE_RATE / 2) {          // 500 ms
+                val at = fragmentAt + i
+                if (at in samples.indices) samples[at] = (sin(i * 0.05) * 0.3).toFloat()
+            }
+            return samples
+        }
+
+        val trailing = VoiceActivityDetector.analyse(chunkWith(oneMinute - AudioFormatSpec.SAMPLE_RATE / 2))
+        assertTrue(
+            "a 500 ms fragment running off the end of the chunk was deleted",
+            trailing.hasSpeech,
+        )
+        assertTrue(trailing.truncatedAtEdge)
+
+        // The same 500 ms with silence either side is not a truncated sentence, it is
+        // a short noise. It stays below the bar, and that is the bar doing its job.
+        val isolated = VoiceActivityDetector.analyse(chunkWith(oneMinute / 2))
+        assertFalse(
+            "an isolated 500 ms blip was treated as speech (${isolated.rawVoicedMs} ms)",
+            isolated.hasSpeech,
+        )
+        assertFalse(isolated.truncatedAtEdge)
+    }
+
+    @Test
     fun `continuous modulated noise is not voiced end to end`() {
         // A television in the next room fills every frame, so the 20th percentile
         // lands inside the noise and 2.5x it clears most of the signal. One real

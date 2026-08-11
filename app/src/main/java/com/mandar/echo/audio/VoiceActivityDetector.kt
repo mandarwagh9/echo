@@ -100,6 +100,11 @@ object VoiceActivityDetector {
          * against padded output would make it a test of whether padding happened.
          */
         val rawVoicedMs: Long,
+        /**
+         * Whether voiced audio runs off the start or end of the chunk, meaning its
+         * true length is not knowable from this file.
+         */
+        val truncatedAtEdge: Boolean,
         private val originalSamples: Int,
     ) {
 
@@ -114,8 +119,19 @@ object VoiceActivityDetector {
 
         val isEmpty: Boolean get() = samples.isEmpty()
 
-        /** Whether this chunk is worth sending to a backend at all. */
-        val hasSpeech: Boolean get() = rawVoicedMs >= MIN_VOICED_MS
+        /**
+         * Whether this chunk is worth sending to a backend at all.
+         *
+         * A run that touches either edge is exempt from the duration floor. Chunking
+         * cuts the day at a fixed wall-clock interval with no regard for whether
+         * anyone is mid-sentence, so a sentence spanning a boundary leaves a short
+         * tail in one file and a short head in the next. At the 1-minute chunk length
+         * currently configured that happens often, and both fragments are real speech
+         * whose length this file cannot measure -- judging them by a duration they
+         * were cut out of would delete them and their audio. They still have to clear
+         * [MIN_RUN_MS] to count as an utterance at all.
+         */
+        val hasSpeech: Boolean get() = rawVoicedMs >= MIN_VOICED_MS || truncatedAtEdge
 
         /** Voiced audio actually handed to a backend, padding included. */
         val voicedMs: Long get() = samples.size * 1000L / AudioFormatSpec.SAMPLE_RATE
@@ -151,7 +167,7 @@ object VoiceActivityDetector {
         }
     }
 
-    private val EMPTY = Voiced(FloatArray(0), emptyList(), 0L, 0)
+    private val EMPTY = Voiced(FloatArray(0), emptyList(), 0L, truncatedAtEdge = false, originalSamples = 0)
 
     fun analyse(samples: FloatArray): Voiced {
         if (samples.size < FRAME_SAMPLES * 4) return EMPTY
@@ -193,6 +209,7 @@ object VoiceActivityDetector {
         if (utterances.isEmpty()) return EMPTY
 
         val rawVoicedMs = utterances.sumOf { it.last - it.first + 1 }.toLong() * FRAME_MS
+        val truncatedAtEdge = utterances.any { it.first == 0 || it.last == rms.size - 1 }
 
         val regions = utterances
             .map { r ->
@@ -220,7 +237,7 @@ object VoiceActivityDetector {
             System.arraycopy(samples, r.first, out, w, n)
             w += n
         }
-        return Voiced(out, regions, rawVoicedMs, samples.size)
+        return Voiced(out, regions, rawVoicedMs, truncatedAtEdge, samples.size)
     }
 
     private fun frameRms(samples: FloatArray): FloatArray {
