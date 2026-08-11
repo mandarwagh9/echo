@@ -59,9 +59,22 @@ Native code is compiled `-O3` in **both** build types on purpose — a stock deb
 ggml at `-O0`, which cannot keep up with realtime. The release build is signed with the standard
 debug keystore so `assembleRelease` produces a directly installable APK.
 
-`local.properties` (gitignored) supplies `echo.stt.url` / `echo.stt.key` as `BuildConfig.STT_URL`
-and `STT_KEY`. Absent values compile to empty strings and the app simply stays on-device — so a
-fresh clone builds fine, it just has no server configured.
+`local.properties` (gitignored) supplies `echo.stt.url` / `echo.stt.key` and
+`echo.upload.url` / `echo.upload.key` as `BuildConfig` fields. Absent values compile to empty
+strings and that backend is simply unusable — so a fresh clone builds fine, it just has nothing
+configured.
+
+The GCP side has its own tests, offline and credential-free:
+
+```bash
+python -m unittest discover -s gcp/tests -t gcp
+./gradlew :app:testReleaseUnitTest --tests '*GcsUploadLiveTest'   # needs ECHO_LIVE_UPLOAD_URL/KEY
+```
+
+`GcsUploadLiveTest` is skipped unless those env vars are set. It drives the shipping
+`HttpUploadTransport` against the deployed service, which is the only way to catch the things a
+fake cannot — that the session-start POST needs an empty body and `x-goog-resumable: start`, that
+`setFixedLengthStreamingMode` and the signature agree.
 
 Watch it work: `adb logcat -s RecordingService AudioChunker TranscriptionPipeline CloudTranscriber CloudGate EchoWhisper SummaryScheduler`
 
@@ -116,9 +129,50 @@ flex window; Doze defers queued jobs). If recording is off when it fires, the se
 exemptions, so `BootReceiver` posts a "tap to resume" notification instead. This is an OS
 constraint; anything else fails silently.
 
+## Three backends, and the state the third one added
+
+`SttBackend` is `ON_DEVICE` (whisper.cpp), `CLOUD` (the self-hosted IndicConformer server), and
+`BATCH` (upload to GCP, Chirp 3 transcribes it later). The third is the newest and the one most
+likely to surprise you, because it broke the assumption every other path rests on: that a chunk
+is claimed, transcribed and settled in one pass. Under batch the transcript arrives hours later,
+out of band.
+
+**A chunk in `UPLOADED` still holds its audio, and that is not an oversight.** It carries
+`AudioHold.AWAITING_REMOTE` until the transcript comes back. An upload proves a second copy
+reached a bucket, not that anything read it — and the bucket deletes its own copy on a lifecycle
+timer either way. The rule the rest of the codebase enforces is unchanged and must stay so:
+**audio is released when a transcript is stored, never merely when a copy exists elsewhere.**
+
+`UPLOADED` is not terminal (work remains) and not claimable (`nextClaimableId` takes only
+`PENDING`). `docs/ARCH-2026-08-10-batch-first.md` §11 lists every query and sweep that filters on
+`status` or `audioHold` and what each does with it — adding one state produced seven bugs, found
+one per pass, all in the seam between new code and old invariants. Read that table before adding
+an eighth.
+
+The generalisation from it is worth carrying into any change here: **predicates in this codebase
+tend to name the states they want rather than the property they mean.** `!cloudSelected` meant
+"has no remote transcriber"; `status IN ('DONE','SILENT')` meant "settled". Enumerating states is
+correct right up until someone adds one.
+
+## The GCP tier lives in `gcp/`
+
+Not a submodule and not deployed from the app — `gcp/deploy.sh` stands it all up and is
+idempotent. Live in project `agentbillboard`:
+
+| | |
+|---|---|
+| `echo-upload` | Cloud Run service. Mints signed resumable-upload URLs and serves `/v1/segments`. **Bytes never pass through it.** |
+| `echo-batch` | Cloud Run job on a 15-minute tick: reap finished batches, then submit new audio. Also `--summarise` at 23:03 IST. |
+| Buckets | 3-day lifecycle backstop — deliberately longer than dynamic batching's 24-hour SLA, or the backstop races the tier it backs up. |
+
+The separate `vexyl-stt` repo (`C:\Users\Mandar\vexyl-stt`) still serves the `CLOUD` backend and
+is unaffected by any of this.
+
 ## Room
 
-Schema version 2, `MIGRATION_1_2` additive. `fallbackToDestructiveMigration` is **deliberately
+Schema version 2, `MIGRATION_1_2` additive. Note that adding a `ChunkStatus` value needs no
+migration — the column is TEXT and the identity hash covers tables and columns, not enum values —
+but it does need the §11 sweep above. `fallbackToDestructiveMigration` is **deliberately
 absent** — a schema mismatch crashes rather than silently wiping the user's recordings. There is
 no `app/schemas/` export, so any entity change means hand-writing `MIGRATION_2_3` with no golden
 schema to diff against; enabling `room.schemaLocation` first is worth doing before that happens.
