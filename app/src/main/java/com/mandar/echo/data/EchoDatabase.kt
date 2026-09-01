@@ -75,7 +75,13 @@ internal val MIGRATION_1_2 = object : Migration(1, 2) {
         CloudJobEntity::class,
     ],
     version = 2,
-    exportSchema = false,
+    // Exported to app/schemas/ and committed. fallbackToDestructiveMigration is
+    // deliberately absent below, so a wrong migration does not quietly wipe a
+    // database -- it crashes the app permanently, on a stranger's phone, with
+    // their recordings inside it. Without the export there is no golden schema
+    // to diff a new version against and MIGRATION_2_3 would be written by eye;
+    // with it, MigrationTestHelper can open a real v2 database and migrate it.
+    exportSchema = true,
 )
 @TypeConverters(Converters::class)
 abstract class EchoDatabase : RoomDatabase() {

@@ -11,6 +11,50 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// ---------------------------------------------------------------------------
+// Who is this APK for?
+//
+//   personal (default) -- this machine's build. `local.properties` supplies the
+//     STT/upload endpoints and their shared secrets, and the APK is signed with
+//     the Android debug key so it installs over the existing one.
+//
+//   public -- an APK handed to somebody else:
+//     ./gradlew :app:assembleRelease -PechoDistribution=public -PechoAbi=arm64-v8a
+//
+// The two differ in exactly the way that matters: a public APK compiles all four
+// BuildConfig secrets to the empty string. They cannot simply be omitted from
+// local.properties instead, because EchoSettings *falls back* to them whenever
+// its DataStore key is absent -- so a public build carrying them would silently
+// point every stranger's phone at the maintainer's paid GCP project, with the
+// credentials recoverable from the APK by `strings`.
+//
+// Public builds must also be signed with the real upload key, which is what
+// makes the guarantee structural rather than a convention: the debug-signed
+// artifact and the secret-free artifact cannot be the same file, and the build
+// refuses to produce a public one without the keystore.
+// ---------------------------------------------------------------------------
+val distribution = (project.findProperty("echoDistribution") as String?) ?: "personal"
+require(distribution in setOf("personal", "public")) {
+    "echoDistribution must be 'personal' or 'public', was '$distribution'"
+}
+val isPublicBuild = distribution == "public"
+
+val keystoreProps = Properties().apply {
+    rootProject.file("keystore.properties").takeIf { it.exists() }
+        ?.inputStream()?.use { load(it) }
+}
+val hasReleaseKey = keystoreProps.getProperty("storeFile")?.let {
+    rootProject.file(it).exists()
+} ?: false
+
+if (isPublicBuild && !hasReleaseKey) {
+    throw GradleException(
+        "A public build must be signed with the upload key, and keystore.properties is " +
+            "missing or names a keystore that is not there. " +
+            "Run: powershell -File scripts/make-release-key.ps1",
+    )
+}
+
 android {
     namespace = "com.mandar.echo"
     compileSdk = 36
@@ -20,8 +64,11 @@ android {
         applicationId = "com.mandar.echo"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // Public beta. versionCode must increase on every artifact handed out or
+        // Android refuses to install the update over the old one; versionName is
+        // what a tester quotes back in a bug report.
+        versionCode = 2
+        versionName = "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -32,24 +79,21 @@ android {
             rootProject.file("local.properties").takeIf { it.exists() }
                 ?.inputStream()?.use { load(it) }
         }
-        buildConfigField(
-            "String", "STT_URL",
-            "\"${localProps.getProperty("echo.stt.url", "")}\"",
-        )
-        buildConfigField(
-            "String", "STT_KEY",
-            "\"${localProps.getProperty("echo.stt.key", "")}\"",
-        )
+        // A public build reads none of them -- not "reads them and hides them":
+        // the constants are not in the APK at all.
+        fun secret(key: String): String =
+            if (isPublicBuild) "" else localProps.getProperty(key, "")
+
+        buildConfigField("String", "STT_URL", "\"${secret("echo.stt.url")}\"")
+        buildConfigField("String", "STT_KEY", "\"${secret("echo.stt.key")}\"")
         // The batch pipeline's signed-URL minting service. Same rule: absent
         // values compile to empty strings and the backend simply cannot be used.
-        buildConfigField(
-            "String", "UPLOAD_URL",
-            "\"${localProps.getProperty("echo.upload.url", "")}\"",
-        )
-        buildConfigField(
-            "String", "UPLOAD_KEY",
-            "\"${localProps.getProperty("echo.upload.key", "")}\"",
-        )
+        buildConfigField("String", "UPLOAD_URL", "\"${secret("echo.upload.url")}\"")
+        buildConfigField("String", "UPLOAD_KEY", "\"${secret("echo.upload.key")}\"")
+
+        // Lets the UI tell the two apart: a public build offers to *configure* a
+        // server, a personal one already has one.
+        buildConfigField("boolean", "PUBLIC_BUILD", "$isPublicBuild")
 
         ndk {
             // arm64-v8a is the only ABI a real phone needs. x86_64 is here purely
@@ -74,14 +118,26 @@ android {
     }
 
     signingConfigs {
-        // The release build is signed with the debug key on purpose: this is a
-        // personal sideloaded prototype, and it lets `assembleRelease` produce a
-        // directly installable APK with -O3 native code.
+        // A personal build is signed with the debug key on purpose: it lets
+        // `assembleRelease` produce a directly installable APK with -O3 native
+        // code, on top of whatever is already on the developer's phone.
         getByName("debug") {
             storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
+        }
+        // Anything handed to another person. Android identifies an app by its
+        // signing key for life, so this keystore is the only thing that can ever
+        // ship an update to an installed Echo -- lose it and every tester has to
+        // uninstall, taking their transcripts with them.
+        if (hasReleaseKey) {
+            create("upload") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
 
@@ -89,7 +145,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (isPublicBuild) "upload" else "debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
@@ -131,6 +187,20 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+}
+
+/**
+ * Export the Room schema as JSON, committed under `app/schemas/`.
+ *
+ * `fallbackToDestructiveMigration` is deliberately absent, so a wrong migration
+ * does not quietly wipe a database -- it crashes the app, permanently, on a
+ * stranger's phone with their recordings inside it. Until now there was no
+ * golden schema to diff a new version against and `MIGRATION_2_3` would have had
+ * to be written by eye. With the export on, `MigrationTestHelper` can open a real
+ * v2 database and run the migration against it.
+ */
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

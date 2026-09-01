@@ -15,10 +15,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Sideloaded personal build: USE_EXACT_ALARM is auto-granted and needs no
-         runtime request flow. (It is Play-policy restricted, which is irrelevant
-         for an app that is never distributed through Play.) -->
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- SCHEDULE_EXACT_ALARM only. USE_EXACT_ALARM is auto-granted and needs no
+         request flow, which was the right trade while this was a personal
+         sideload, but it is restricted to alarm and calendar apps under Play
+         policy, and a daily journal summary is neither. Declaring it would sink
+         a Play submission and is not needed here: SummaryScheduler already asks
+         canScheduleExactAlarms() and degrades to setAndAllowWhileIdle when the
+         answer is no, so a denied permission moves the 11 PM summary by minutes
+         rather than losing it. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
