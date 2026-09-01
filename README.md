@@ -1,63 +1,145 @@
-# Echo
+<h1 align="center">Echo</h1>
 
-A 24/7 ambient audio journal for Android. It listens all day, transcribes what it hears,
-deletes each recording as soon as its transcript is safely stored, and writes up your day at
-11 PM.
+<p align="center"><b>Your spoken life, written down. On your phone, and nowhere else.</b></p>
 
-Transcription runs **on the phone by default**. Two backends that send audio off it are
-available and off until chosen — see [Transcription backends](#transcription-backends). That
-choice is the most consequential setting in the app.
+<p align="center">
+  <img src="docs/img/onboarding.png" width="30%" alt="Echo first run" />
+  <img src="docs/img/listening-light.png" width="30%" alt="Echo recording" />
+  <img src="docs/img/home-dark.png" width="30%" alt="Echo home screen in dark mode" />
+</p>
 
-Built first for a single device, now in a **public sideload beta (0.9.0)**. Read
-[Privacy and legal](#privacy-and-legal) before you install it: this app records the people
-around you, and that is your responsibility rather than the app's.
+Echo listens all day, transcribes what it hears **on the device**, deletes each recording the
+moment its transcript is saved, and writes your day up at 11 PM.
+
+No account. No upload. No subscription. No extra hardware, because you already carry a
+microphone all day.
+
+**[Download the APK](https://github.com/mandarwagh9/echo/releases)** · Android 10+, arm64 ·
+25 MB · public beta 0.9.0
 
 ---
 
-## What it does
+## The problem
+
+Everyone who tried to build an ambient recorder built the same thing: a $200 pendant, a
+subscription, and a pipe to somebody else's server. Then the category consolidated into big
+tech. Limitless was [acquired by Meta](https://www.cnbc.com/2025/12/05/meta-limitless-ai-wearable.html)
+in December 2025 and its Pendant is no longer sold to new customers. Bee was
+[acquired by Amazon](https://techcrunch.com/2025/07/22/amazon-acquires-bee-the-ai-wearable-that-records-everything-you-say/)
+in July 2025. What is still on sale, like [Plaud's](https://www.plaud.ai) NotePin S, is
+hardware you buy once plus a plan you pay for monthly.
+
+So the honest state of the art for "remember my life" is: buy a second device, pay monthly, and
+send every conversation you have, plus every conversation of everyone standing near you, to a
+company that was just bought by a larger one.
+
+Echo is the version that runs on the phone already in your pocket and keeps the audio there.
+
+## The thing nobody says out loud
+
+Ambient AI is sold as a solved problem. It is solved in English.
+
+Measured against known references, on-device Whisper Base recovers **0.23 of Hindi words and
+0.00 of Marathi**. Not "worse". Zero. A day of Marathi through Base produces a transcript that
+is not a transcript.
+
+That measurement is why this codebase is shaped the way it is. Transcription is a swappable
+backend rather than a hardcoded call, because the honest answer for Devanagari today is a model
+bigger than a phone can hold, and pretending otherwise ships a product that quietly fails for
+the languages a billion people actually speak.
+
+| Backend | Where it runs | Hindi / Marathi | The trade |
+|---|---|---|---|
+| **On device** (default) | whisper.cpp, your phone | 0.23 / 0.00 | Nothing leaves. Cannot do Devanagari. |
+| **Your server** | self-hosted IndicConformer-600M | 1.00 / 1.00 | Audio goes to a server you run. |
+| **Batch** | Google Cloud, `gcp/` | 1.00 / 1.00 | Audio uploaded, transcribed later, cheapest. |
+
+Word recall against known references. Every figure comes from text-to-speech clips rather than
+far-field room audio, so read them as a floor on how bad a model is, not a promise of how good.
+The public build ships with **no server of its own**: rows two and three do nothing until you
+point them at something you run. Numbers in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
+## Why this is possible now
+
+On-device speech got fast enough to keep up with a life, on hardware people already own.
+
+Measured on a Pixel 9: **5.3x realtime** with the shipping Base model on 4 threads. 66 seconds
+of audio transcribed in 12.5 seconds, which puts a full 10-minute chunk at about 113 seconds.
+That number is the whole product. A 24/7 recorder that transcribes slower than it records has a
+queue that never drains and eventually eats the disk. 5.3x has margin. 0.9x would be a demo.
+
+## How it works
 
 ```
-mic ──► 10-minute WAV chunks ──► on-device Whisper ──► transcript in SQLite ──► audio deleted
-                                                              │
-                                                    11:00 PM  ▼
-                                                        daily summary
+mic ──► 10-min WAV chunks ──► voice-activity gate ──► whisper.cpp ──► transcript in SQLite
+                                                                            │
+                                                                     audio deleted
+                                                                            │
+                                                                    11 PM   ▼
+                                                                     your day, written up
 ```
 
-- **Records continuously.** A foreground service holds the mic; a dedicated reader thread
-  does nothing but drain `AudioRecord`, so disk or CPU stalls can never cost you audio.
-- **Chunks are sample-exact.** Rotation happens at exactly 9,600,000 samples without ever
-  stopping the recorder, so chunk *N+1* starts on the sample after chunk *N*. No gaps.
-- **Transcribes offline by default.** whisper.cpp compiled for arm64, running on 2–4 threads.
-  On the default backend the only network call the app makes is the one-time model download.
-- **Multilingual.** English, Hindi and Marathi, with per-chunk auto-detection so code-switched
-  speech survives.
-- **Deletes audio.** The WAV is unlinked only after the transcript commits — never before.
-- **Summarises at 11 PM.** Timeline, distinctive topics, names mentioned, language mix, and
-  the day's key moments — all computed on-device.
+- **Recording outranks everything.** A dedicated reader thread does nothing but drain
+  `AudioRecord`. No file I/O, no database, no allocation. If the writer stalls the queue grows,
+  and the microphone is never blocked.
+- **Chunk rotation is sample-exact.** Rotation happens at exactly 9,600,000 samples without ever
+  stopping the recorder, so chunk *N+1* begins on the sample after chunk *N*. No gaps, by
+  construction.
+- **Audio is deleted only once its transcript is proven safe.** Never before, and never merely
+  because a copy reached a bucket somewhere.
+- **Silence is skipped.** Most of a day is room tone, and Whisper on near-silence reliably
+  invents sentences. The gate removes a whole class of garbage, and a lot of battery.
 
-## Requirements
+## Status
 
-| | |
-|---|---|
-| Phone | arm64-v8a, Android 10 (API 29) or newer |
-| Build | JDK 17, Android SDK 36, NDK 27.1, CMake 3.22 |
+**Public beta, 0.9.0.** Honestly: you would be early.
 
-## Installing
+Echo has run on the author's own phone since 5 August 2026. One day of that record holds
+**13,887 transcribed words across 10 h 25 min of speech**, from 1,380 chunks, 512 of which were
+skipped as silence. That is the traction: one person, one phone, a real archive. There are no
+other users yet.
+
+The interface was rebuilt for people who did not write it, and first run was walked end to end
+on a clean device: consent, permissions, the battery exemption, model download, recording.
+Battery behaviour was reworked at the same time, and **those changes are reasoned rather than
+measured**. There is no `batterystats` baseline yet.
+
+**It cannot ship on Google Play.** A 24/7 recorder needs the Doze exemption, and requesting it
+directly violates Play's content policy, which allows it only for app types a personal journal
+is not on. That is a deliberate trade rather than an oversight: without the exemption recording
+stops overnight, which is not a degraded product but the absence of one. So Echo is distributed
+as a signed APK.
+
+## Install
 
 Download the APK from [Releases](https://github.com/mandarwagh9/echo/releases), allow your
-browser to install unknown apps when Android asks, and open it. Echo walks you through the rest.
+browser to install unknown apps when Android asks, and open it. Setup handles the rest.
 
-The app needs three things and asks for all of them during setup:
+Echo asks for three things, and all three are load-bearing:
 
-| | |
+| | Why |
 |---|---|
-| Microphone | The whole app. Nothing works without it. |
-| Notifications | The ongoing notification is the only always-visible sign that a recorder is running, and the alert channel is how Echo tells you capture has stopped. |
-| Background running | Android suspends apps once the screen has been off a while. Without the exemption, recording stops some time after you put the phone down. **This is the step people skip and then report as a bug.** |
+| Microphone | The whole app. |
+| Notifications | The ongoing notification is the only always-visible sign a recorder is running, and the alert channel is how Echo tells you capture stopped. |
+| Background running | Android suspends apps once the screen has been off a while. **This is the step people skip and then report as a bug.** |
 
-Then it downloads a speech model, once, and works offline afterwards.
+Then it downloads a speech model once, and works offline afterwards.
 
-## Building
+## Privacy, and the law
+
+On the default backend, audio and transcripts never leave the device. Storage is app-private,
+cloud backup is disabled, and "Delete everything" really does wipe the database and the files.
+
+That does not make Echo safe to use casually. **It records people who have not consented.**
+India's DPDP Act governs processing other people's personal data; using this in a
+two-party-consent jurisdiction, or anywhere under GDPR, is a live legal problem. The persistent
+notification and the always-visible recording state are deliberate. They are the only honest
+signal the people around you get.
+
+Echo says this on the second screen of setup, before it ever opens the microphone, and makes
+you acknowledge it. That is on purpose.
+
+## Build it yourself
 
 ```bash
 git clone --recurse-submodules https://github.com/mandarwagh9/echo.git
@@ -67,7 +149,7 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 ```
 
 That is a **personal** build: it reads the endpoints in `local.properties` and is signed with
-the Android debug key. An APK meant for anyone else is built with
+the Android debug key. A build meant for anyone else is
 
 ```bash
 ./gradlew :app:assembleRelease -PechoDistribution=public -PechoAbi=arm64-v8a
@@ -78,127 +160,22 @@ which compiles those endpoints out entirely and signs with the upload key from
 produce a public APK without that keystore, so the secret-free artifact and the debug-signed one
 cannot be the same file.
 
-`-PechoAbi=arm64-v8a` builds for phones only — 24.5 MB. Omit it to also bundle `x86_64` for
-emulator testing, at 28.8 MB.
-
-whisper.cpp is a submodule pinned to **v1.9.2**; if you already cloned without
-`--recurse-submodules`, run `git submodule update --init`.
-
-On Windows, `scripts\verify-on-device.ps1` does the install, the runtime-permission grants and
-the battery-optimisation exemption in one step.
-
-The release build is signed with the standard debug keystore so it installs directly. Native
-code is compiled `-O3` in **both** build types — a stock debug build compiles ggml at `-O0`,
-which is far too slow to keep up with realtime.
-
-## First run
-
-Setup covers consent, the three permissions above, and the model download. `Base` (57 MB) is
-the right default; `Tiny` is faster but noticeably weaker on Hindi and Marathi.
-
-To watch the whole pipeline without waiting ten minutes, set **Settings → Advanced → Recording
-length → 1 min**.
-
-## Status
-
-Public beta, 0.9.0. The interface was rebuilt for people who did not write the app, and battery
-behaviour was reworked (the wake lock now follows capture rather than the service, and work that
-exists only to feed the UI stops when no UI is on screen). **Those battery changes have not yet
-been measured on hardware** — there is no `batterystats` before-and-after, only the reasoning.
-
-Underneath, the pipeline is the same one described below. **On a Pixel 9 (Android 17):** the JVM suite and 11 instrumented tests
-passing, plus the throughput measurement below. **On an Android 16 emulator:** a live recording
-run confirming sample-exact chunking and audio deletion, and the 11 PM summary chain fired end
-to end — neither of which has been repeated on the phone yet. Full record, including the eleven
-bugs the process surfaced and an explicit list of what remains unverified, is in
-[docs/VERIFICATION.md](docs/VERIFICATION.md).
-
-**Throughput on the Pixel 9: 5.3× realtime** with the shipping **Base** model on 4 threads —
-66 s of audio transcribed in 12.5 s, which puts a full 10-minute chunk at about **113 seconds**.
-That is the number that decides whether a 24/7 app can drain its queue, and it has a comfortable
-margin. (The emulator's 0.48× was Tiny on an x86_64 CPU without AVX2 and was never meaningful.)
-
-## Transcription backends
-
-Three, chosen in Settings. Only the first is a default.
-
-| | Where | Hindi / Marathi | Trade |
-|---|---|---|---|
-| **On device** | whisper.cpp, this phone | 0.23 / **0.00** | Nothing leaves. Cannot do Devanagari. |
-| **Your server** | self-hosted IndicConformer-600M | 1.00 / 1.00 | Audio uploaded to a server you run. |
-| **Batch (Chirp 3)** | Google Cloud, `gcp/` | 1.00 / 1.00 | Audio uploaded, transcribed later, cheapest. |
-
-Word recall against known references — see [docs/VERIFICATION.md](docs/VERIFICATION.md) for the
-on-device numbers and [eval/chirp3_eval.py](eval/chirp3_eval.py) for Chirp 3's. **Every one of
-those figures is from clips synthesised by text-to-speech, not far-field room audio**, so read
-them as a floor on how bad a model is, not a promise of how good.
-
-Marathi at 0.00 is why the other two exist. It is not "worse", it is nothing: a day of Marathi
-through Whisper Base produces a transcript that is not a transcript.
-
-**The batch backend keeps your recording on the phone until its transcript comes back.** An
-upload proves a copy reached a bucket, not that anything read it. See
-[docs/ARCH-2026-08-10-batch-first.md](docs/ARCH-2026-08-10-batch-first.md).
-
-## Design notes
-
-The full rationale is in [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md). The decisions worth
-knowing up front:
-
-**Recording beats transcription; transcription beats disk.** If the phone falls behind, the
-app keeps recording and lets the queue grow. Audio is never deleted on an unproven path — a
-chunk that fails to transcribe three times is marked `FAILED` and **keeps its audio** so it
-can be retried.
-
-**`MIC`, not `VOICE_RECOGNITION`.** `VOICE_RECOGNITION` applies near-field AGC and noise
-suppression tuned for a phone held to your face, which actively damages far-field room
-capture. It is also the source most aggressively yielded to the assistant on many devices.
-
-**A VAD gate runs before Whisper.** Most of a real day is silence, and Whisper on near-silence
-reliably hallucinates ("Thank you.", subtitle credits). Skipping silent chunks removes a whole
-class of garbage and saves a lot of battery.
-
-**Exact alarms, not `WorkManager`, for 11 PM.** Periodic work has a ~15-minute flex window and
-will not land on the hour. The alarm hands off to the already-running foreground service, so
-Doze cannot defer the work the way it would defer a queued job.
-
-**Reboot needs a tap.** Android does not permit a *microphone* foreground service to be started
-from `BOOT_COMPLETED` — mic and camera are while-in-use permissions, explicitly excluded from
-the background-start exemptions. After a reboot Echo posts a "tap to resume" notification.
-Anything else would fail silently.
+Toolchain: JDK 17, Android SDK 36, NDK 27.1, CMake 3.22. whisper.cpp is a submodule pinned to
+v1.9.2; run `git submodule update --init` if you cloned flat.
 
 ## Known limitations
 
-- **Reboot does not auto-resume** (above). This is an OS constraint, not an oversight.
-- **The mic is exclusive.** A phone call, the assistant, or another recording app takes the
-  microphone away. Echo detects this and retries with backoff, but audio during that window
-  is genuinely lost.
-- **Name detection is weak.** It keys off capitalisation, so it works in English and misses
-  Hindi and Marathi names entirely. The UI labels it approximate rather than pretending.
-- **OEM battery managers** (Xiaomi, Samsung, OnePlus) may kill long-running services. Mark
-  Echo as unrestricted in battery settings.
-- **Base is weak on Devanagari.** This is the honest headline limitation. On clean, studio-clean
-  Hindi it returns correct script and roughly the right words; on far-field Marathi in a noisy
-  room it returns correct script and approximately the right *sounds*. `Small` is meaningfully
-  better and roughly three times the compute — see
-  [docs/VERIFICATION.md](docs/VERIFICATION.md) for the measured comparison.
-- **Throughput is the binding constraint, not accuracy.** Base runs at 5.3× realtime on clean
-  English and collapses on hard audio, because the temperature-fallback ladder retries every
-  window that looks degenerate. A 24/7 recorder that transcribes slower than it records has a
-  queue that never drains, so the ladder is deliberately capped.
-
-## Privacy and legal
-
-**On the default backend**, audio and transcripts never leave the device, and the other two
-backends are opt-in rather than defaults. The public build ships with no server of its own:
-those two backends do nothing until you point them at something you run yourself. Storage is app-private, cloud backup is disabled,
-and "Delete everything" really does wipe the database and files.
-
-That does not make this app safe to use casually. **It records people who have not consented.**
-India's DPDP Act governs processing others' personal data; using this in a two-party-consent
-jurisdiction or anywhere under GDPR is a live legal problem. The persistent notification and
-always-visible recording state are deliberate — they are the only honest signal the people
-around you get.
+- **Reboot does not auto-resume.** Android excludes microphone foreground services from
+  background-start exemptions, so Echo posts a "tap to resume" notification instead. An OS
+  constraint, not an oversight.
+- **The mic is exclusive.** A call, the assistant, or another recorder takes it away. Echo
+  retries with backoff, but audio in that window is genuinely lost.
+- **Base is weak on Devanagari.** The honest headline limitation, quantified above.
+- **Name detection keys off capitalisation**, so it works in English and misses Hindi and
+  Marathi names entirely. The UI labels it approximate rather than pretending.
+- **OEM battery managers** (Xiaomi, Samsung, OnePlus) may kill long-running services anyway.
+- **Throughput, not accuracy, is the binding constraint.** The temperature-fallback ladder is
+  deliberately capped for exactly this reason.
 
 ## Layout
 
@@ -210,13 +187,22 @@ app/src/main/
     stt/               whisper engine, model download, transcription pipeline
     data/              Room entities, DAOs, settings
     summary/           summariser, TextRank, scheduling
-    ui/                Compose screens, monochrome design system
+    ui/                Compose screens, onboarding, design system
 app/src/test/          JVM unit tests
-eval/                  chirp3_eval.py — scores a backend on the shared fixtures
-gcp/                   the batch tier: upload service, batch job, nightly summary
+app/schemas/           exported Room schemas, committed
+gcp/                   the batch tier: upload service and reaper job
+eval/                  chirp3_eval.py, scores a backend on the shared fixtures
 third_party/whisper.cpp
 ```
 
+Deeper reading: [SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) for the queue's invariants,
+[VERIFICATION.md](docs/VERIFICATION.md) for what was measured on hardware,
+[ARCH-2026-08-10-batch-first.md](docs/ARCH-2026-08-10-batch-first.md) for the batch pipeline.
+
 ## Licence
 
-Personal project. whisper.cpp is MIT, © Georgi Gerganov.
+No licence has been granted yet, which by default means all rights reserved: read the source,
+build it for yourself, but there is no permission here to redistribute or build on it. If you
+want to, open an issue and ask.
+
+whisper.cpp is vendored as a submodule and is MIT, (c) Georgi Gerganov.
