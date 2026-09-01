@@ -2,8 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Echo is a 24/7 ambient audio recorder for Android (Kotlin/Compose + whisper.cpp via JNI),
-targeting **one device** — the developer's Pixel 9. It records continuously, transcribes in
+Echo is a 24/7 ambient audio recorder for Android (Kotlin/Compose + whisper.cpp via JNI).
+It began as a build for **one device** (the developer's Pixel 9) and is now being prepared for
+a public sideload beta, which changes several assumptions the older docs still rest on: see
+"Personal builds and public builds" below. It records continuously, transcribes in
 chunks, deletes each WAV only once deletion is proven safe, and summarises the day at 23:00.
 
 Deeper context lives in `docs/`: `SYSTEM_DESIGN.md` (the why, and the queue's invariants),
@@ -30,6 +32,91 @@ completed a run). To run only the known-good subset:
 ```
 -Pandroid.testInstrumentationRunnerArguments.class=com.mandar.echo.WhisperPipelineInstrumentedTest,com.mandar.echo.SummaryEngineInstrumentedTest
 ```
+
+## Personal builds and public builds
+
+`-PechoDistribution=public` is the difference between an APK for this machine and an APK for
+somebody else, and the two differ in the only way that matters.
+
+A public build compiles all four `BuildConfig` secrets to the empty string. They cannot simply
+be left out of `local.properties` instead, because `EchoSettings` *falls back* to them when its
+DataStore key is absent, so a public build carrying them would silently point every stranger's
+phone at the maintainer's paid GCP project with the credentials recoverable by `strings`. There
+is a `BuildConfig.PUBLIC_BUILD` flag so the UI can tell the two apart; Settings uses it to drop
+the "use built-in server" affordance, which in a public build would point at nothing.
+
+Public builds are also signed with the upload key from `keystore.properties` rather than the
+debug key, and the build **fails** rather than falling back if that keystore is missing. That is
+what makes the guarantee structural: the debug-signed artifact and the secret-free artifact
+cannot be the same file.
+
+```bash
+./gradlew :app:assembleRelease -PechoDistribution=public -PechoAbi=arm64-v8a
+```
+
+`scripts/make-release-key.ps1` generates the keystore once. Both it and `keystore.properties`
+are gitignored and are the only things that can ever ship an update to an installed Echo; losing
+them means every tester has to uninstall, taking their transcripts with them.
+
+`USE_EXACT_ALARM` was dropped from the manifest. It is auto-granted and needed no request flow,
+which was right for a sideload, but it is restricted to alarm and calendar apps under Play policy
+and a daily journal summary is neither. `SummaryScheduler` already asked `canScheduleExactAlarms()`
+and degraded to `setAndAllowWhileIdle`, so the loss moves the summary by minutes rather than
+dropping it.
+
+## Battery
+
+This is a service designed to run for days, so anything that wakes the CPU on a timer is a
+product decision, not an implementation detail.
+
+- **The wake lock follows capture, not the service.** It is acquired only once
+  `chunker.isRunning` is actually true, released when the disk-full pause stops capture, and
+  during the mic-restart backoff it is re-taken *bounded by the backoff itself*. It cannot simply
+  be dropped there: coroutine `delay()` does not wake a suspended device, and a recorder that
+  resumes at the next maintenance window instead of in two seconds loses the audio in between.
+- **`EchoServiceState.uiVisible`** is set from `MainActivity`'s START/STOP and gates every piece
+  of work that exists only to feed the interface. The transcription progress pump used to run at
+  2 Hz for the life of the service whether or not anything was transcribing and whether or not
+  anyone was looking, which is ~172,000 wakeups a day to animate a bar on a screen that is off.
+  It now conflates `uiVisible` with `pipeline.busy` and suspends outright.
+- **`AudioChunker.Callbacks.wantsLevels()`** is read on the reader thread, so it must stay a
+  plain volatile read. When it is false the RMS pass is skipped entirely rather than computed and
+  discarded, which is the normal case.
+- **The housekeeping loop is 60 s**, not 15 s, `statfs` runs at half that cadence, and
+  `updateNotification` skips the post when the string has not changed. Nothing it watches moves
+  fast enough to care.
+
+None of this has been measured on hardware yet. There is no `batterystats` baseline; the
+reasoning is sound and the numbers are not in.
+
+## The interface
+
+Rebuilt for people who did not write it. `docs/` predates it.
+
+`ui/theme/Theme.kt` is the design system and states the rules it locks: one accent (a warm amber
+that means "look here" and nothing else), one radius scale, both themes designed, and **motion
+that is caused rather than idle**. Nothing loops on a timer; the level meter is the only
+continuously-moving element and it moves only because the microphone is producing values, which
+stop entirely when `uiVisible` is false. Every colour carrying text has its measured contrast
+ratio written beside it, and two candidate greys and two candidate ambers were rejected for
+failing 4.5:1 on `surface` specifically, which is the background most easily forgotten.
+
+`material-icons-extended` is still not a dependency and must not become one (~30 MB of dex).
+`material-icons-core` arrives transitively with material3 and is what the icons come from; there
+is no microphone glyph in it, which is fine, because `RecordControl` is drawn as geometry.
+
+Navigation is Home / Days / Settings with a day pushed on top. Home reads `segmentsToday` and
+the other today flows; the day browser owns `selectedDate`. They are deliberately separate state:
+sharing one date meant opening yesterday silently blanked the home screen.
+
+`ui/onboarding/Onboarding.kt` is new and is where consent, the microphone and notification
+permissions, **the battery-optimisation exemption** and the model download happen. That exemption
+had no code path anywhere in the app before; it had only ever been granted by hand through
+`scripts/verify-on-device.ps1`, so a stranger's install would lose capture overnight with nothing
+on screen explaining it.
+
+`ui/preview/DesignPreviews.kt` renders the whole component set in both themes in Android Studio,
+which is the only way to look at this interface without a device.
 
 ## Build and test
 
@@ -223,4 +310,7 @@ returns `error_message` on status but `error` on submit refusals.
 - The README predates the cloud backend and still says nothing is ever uploaded. The cloud path
   ships, off by default and opt-in; `SettingsScreen` copy has the same drift. Worth fixing, but
   don't take the copy as a statement of behaviour.
-- `main` is currently ahead of `origin/main`, so recent work exists on this disk only.
+- Room's `exportSchema` is now **on**, with `app/schemas/` committed. `fallbackToDestructiveMigration`
+  is still deliberately absent, so a wrong migration crashes a stranger's app permanently with
+  their recordings inside it; there is now a golden schema to diff `MIGRATION_2_3` against and
+  `MigrationTestHelper` can open a real v2 database.

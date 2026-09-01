@@ -8,8 +8,9 @@ Transcription runs **on the phone by default**. Two backends that send audio off
 available and off until chosen — see [Transcription backends](#transcription-backends). That
 choice is the most consequential setting in the app.
 
-Built as a personal prototype for a single device — not a shippable product. See
-[Privacy and legal](#privacy-and-legal).
+Built first for a single device, now in a **public sideload beta (0.9.0)**. Read
+[Privacy and legal](#privacy-and-legal) before you install it: this app records the people
+around you, and that is your responsibility rather than the app's.
 
 ---
 
@@ -41,6 +42,21 @@ mic ──► 10-minute WAV chunks ──► on-device Whisper ──► transcr
 | Phone | arm64-v8a, Android 10 (API 29) or newer |
 | Build | JDK 17, Android SDK 36, NDK 27.1, CMake 3.22 |
 
+## Installing
+
+Download the APK from [Releases](https://github.com/mandarwagh9/echo/releases), allow your
+browser to install unknown apps when Android asks, and open it. Echo walks you through the rest.
+
+The app needs three things and asks for all of them during setup:
+
+| | |
+|---|---|
+| Microphone | The whole app. Nothing works without it. |
+| Notifications | The ongoing notification is the only always-visible sign that a recorder is running, and the alert channel is how Echo tells you capture has stopped. |
+| Background running | Android suspends apps once the screen has been off a while. Without the exemption, recording stops some time after you put the phone down. **This is the step people skip and then report as a bug.** |
+
+Then it downloads a speech model, once, and works offline afterwards.
+
 ## Building
 
 ```bash
@@ -49,6 +65,18 @@ cd echo
 ./gradlew :app:assembleRelease -PechoAbi=arm64-v8a
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+That is a **personal** build: it reads the endpoints in `local.properties` and is signed with
+the Android debug key. An APK meant for anyone else is built with
+
+```bash
+./gradlew :app:assembleRelease -PechoDistribution=public -PechoAbi=arm64-v8a
+```
+
+which compiles those endpoints out entirely and signs with the upload key from
+`keystore.properties` (`scripts/make-release-key.ps1` creates it, once). The build refuses to
+produce a public APK without that keystore, so the secret-free artifact and the debug-signed one
+cannot be the same file.
 
 `-PechoAbi=arm64-v8a` builds for phones only — 24.5 MB. Omit it to also bundle `x86_64` for
 emulator testing, at 28.8 MB.
@@ -65,17 +93,20 @@ which is far too slow to keep up with realtime.
 
 ## First run
 
-1. Grant microphone + notification permissions.
-2. **Settings → Speech model → Download.** `Base` (57 MB) is the right default; `Tiny` is
-   faster but noticeably weaker on Hindi and Marathi.
-3. Tap the record button.
+Setup covers consent, the three permissions above, and the model download. `Base` (57 MB) is
+the right default; `Tiny` is faster but noticeably weaker on Hindi and Marathi.
 
-To see the full pipeline without waiting ten minutes, set **Settings → Capture → Chunk
-length → 1 minute**.
+To watch the whole pipeline without waiting ten minutes, set **Settings → Advanced → Recording
+length → 1 min**.
 
 ## Status
 
-Working prototype. **On a Pixel 9 (Android 17):** the JVM suite and 11 instrumented tests
+Public beta, 0.9.0. The interface was rebuilt for people who did not write the app, and battery
+behaviour was reworked (the wake lock now follows capture rather than the service, and work that
+exists only to feed the UI stops when no UI is on screen). **Those battery changes have not yet
+been measured on hardware** — there is no `batterystats` before-and-after, only the reasoning.
+
+Underneath, the pipeline is the same one described below. **On a Pixel 9 (Android 17):** the JVM suite and 11 instrumented tests
 passing, plus the throughput measurement below. **On an Android 16 emulator:** a live recording
 run confirming sample-exact chunking and audio deletion, and the 11 PM summary chain fired end
 to end — neither of which has been repeated on the phone yet. Full record, including the eleven
@@ -158,8 +189,9 @@ Anything else would fail silently.
 
 ## Privacy and legal
 
-**On the default backend**, audio and transcripts never leave the device — and the other two
-backends are opt-in, not defaults. Storage is app-private, cloud backup is disabled,
+**On the default backend**, audio and transcripts never leave the device, and the other two
+backends are opt-in rather than defaults. The public build ships with no server of its own:
+those two backends do nothing until you point them at something you run yourself. Storage is app-private, cloud backup is disabled,
 and "Delete everything" really does wipe the database and files.
 
 That does not make this app safe to use casually. **It records people who have not consented.**
