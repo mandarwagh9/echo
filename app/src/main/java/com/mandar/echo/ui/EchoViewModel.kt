@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -39,6 +40,45 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
 
     val settings: StateFlow<Settings> = echo.settings.flow
         .stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
+    /**
+     * Which of the two front doors to open, and whether that is known yet.
+     *
+     * [Launch.Undecided] is not a formality. `settings` is a StateFlow seeded
+     * with `Settings()`, whose `onboardingComplete` is false, so reading the flag
+     * directly shows the welcome screen for a frame on every single cold start,
+     * to every user, forever. Worse, the flag is *absent* on any install that
+     * predates it, which is every phone already running Echo: they would each be
+     * dropped into first-run setup with their recordings still on disk, offered a
+     * model they already have, and invited to leave the recorder switched off.
+     *
+     * So an install that already holds a model or any captured audio counts as
+     * onboarded, and the flag is written to say so.
+     */
+    enum class Launch { Undecided, Onboarding, Ready }
+
+    private val _launch = MutableStateFlow(Launch.Undecided)
+    val launch: StateFlow<Launch> = _launch
+
+    init {
+        viewModelScope.launch {
+            _launch.value = when {
+                echo.settings.current().onboardingComplete -> Launch.Ready
+                hasExistingData() -> {
+                    echo.settings.setOnboardingComplete(true)
+                    Launch.Ready
+                }
+                else -> Launch.Onboarding
+            }
+        }
+    }
+
+    private suspend fun hasExistingData(): Boolean {
+        if (echo.models.installed().isNotEmpty()) return true
+        return runCatching {
+            echo.db.chunkDao().samplesBetween(0L, Long.MAX_VALUE)
+        }.getOrDefault(0L) > 0L
+    }
 
     val recording = EchoServiceState.recording
     val pausedReason = EchoServiceState.pausedReason
@@ -74,6 +114,43 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedDate = MutableStateFlow(LocalDate.now())
     val selectedDate: StateFlow<LocalDate> = _selectedDate
 
+    /**
+     * Today, held apart from [selectedDate].
+     *
+     * Home always shows today and the day browser owns the date being read.
+     * Sharing one date between them means opening yesterday silently blanks the
+     * home screen, which reads as data loss rather than as navigation.
+     */
+    private val today = MutableStateFlow(LocalDate.now())
+
+    val segmentsToday: StateFlow<List<SegmentEntity>> = today
+        .flatMapLatest { date ->
+            val (from, to) = date.bounds()
+            echo.db.segmentDao().betweenFlow(from, to)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val chunksToday: StateFlow<List<ChunkEntity>> = today
+        .flatMapLatest { date ->
+            val (from, to) = date.bounds()
+            echo.db.chunkDao().chunksBetweenFlow(from, to)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val summaryToday: StateFlow<SummaryEntity?> = today
+        .flatMapLatest { echo.db.summaryDao().forDayFlow(it.toEpochDay()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /**
+     * Rolls [today] over when the app is opened after midnight. Cheap enough to
+     * call from the UI's resume, and the alternative is a home screen that keeps
+     * showing yesterday until the process is killed.
+     */
+    fun refreshToday() {
+        val now = LocalDate.now()
+        if (today.value != now) today.value = now
+    }
+
     val segmentsForDay: StateFlow<List<SegmentEntity>> = _selectedDate
         .flatMapLatest { date ->
             val (from, to) = date.bounds()
@@ -93,6 +170,12 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val summaries: StateFlow<List<SummaryEntity>> = echo.db.summaryDao().recent()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Days that hold a recording, newest first. Drives the day browser. */
+    val recordedDays: StateFlow<List<LocalDate>> = echo.db.chunkDao()
+        .recordedDays(zone.rules.getOffset(java.time.Instant.now()).totalSeconds * 1000L)
+        .map { days -> days.map(LocalDate::ofEpochDay) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _query = MutableStateFlow("")
@@ -146,6 +229,49 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             echo.settings.setRecordingEnabled(true)
             RecordingService.start(context)
+        }
+    }
+
+    // ---- first run --------------------------------------------------------
+
+    fun completeOnboarding() {
+        _launch.value = Launch.Ready
+        viewModelScope.launch { echo.settings.setOnboardingComplete(true) }
+    }
+
+    /**
+     * Whether Android will let Echo run outside its Doze restrictions.
+     *
+     * This is the single setting that decides whether a 24/7 recorder actually
+     * records for 24 hours. Without the exemption the process is frozen during
+     * Doze, capture stops some time after the screen goes off, and the user
+     * wakes up to a night that was never recorded and no error explaining it.
+     */
+    fun batteryExemptionGranted(context: Context): Boolean {
+        val pm = context.getSystemService(android.os.PowerManager::class.java) ?: return false
+        return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }
+            .getOrDefault(false)
+    }
+
+    /**
+     * Opens the system dialog asking for that exemption.
+     *
+     * ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is the one that shows a
+     * one-tap prompt. If the OEM has removed it (some do), fall back to the
+     * settings list, which is a longer road but is always present.
+     */
+    fun batteryExemptionIntent(context: Context): android.content.Intent {
+        val direct = android.content.Intent(
+            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            android.net.Uri.parse("package:" + context.packageName),
+        )
+        val resolvable = direct.resolveActivity(context.packageManager) != null
+        return if (resolvable) {
+            direct
+        } else {
+            android.content.Intent(
+                android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+            )
         }
     }
 

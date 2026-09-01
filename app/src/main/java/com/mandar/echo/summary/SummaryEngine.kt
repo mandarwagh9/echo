@@ -195,7 +195,7 @@ class SummaryEngine(
             appendLine("## When you talked")
             appendLine()
             busiest.forEach { (hour, words) ->
-                appendLine("- **${"%02d:00".format(hour)}–${"%02d:00".format((hour + 1) % 24)}** · ${"%,d".format(words)} words")
+                appendLine("- **${"%02d:00".format(hour)} to ${"%02d:00".format((hour + 1) % 24)}** · ${"%,d".format(words)} words")
             }
             appendLine()
         }
@@ -205,7 +205,7 @@ class SummaryEngine(
             appendLine()
             val total = s.languages.values.sum().coerceAtLeast(1)
             s.languages.entries.sortedByDescending { it.value }.forEach { (code, count) ->
-                appendLine("- ${languageName(code)} — ${(count * 100 / total)}%")
+                appendLine("- ${languageName(code)}: ${(count * 100 / total)}%")
             }
             appendLine()
         }
@@ -234,7 +234,7 @@ class SummaryEngine(
                 val stamp = at?.let {
                     Instant.ofEpochMilli(it).atZone(zone).let { z -> "%02d:%02d".format(z.hour, z.minute) }
                 }
-                if (stamp != null) appendLine("- **$stamp** — $line") else appendLine("- $line")
+                if (stamp != null) appendLine("- **$stamp** $line") else appendLine("- $line")
             }
             appendLine()
         }

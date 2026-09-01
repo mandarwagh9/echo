@@ -43,6 +43,17 @@ class AudioChunker(
         fun onChunkStarted(file: File, startedAtMs: Long): Long
         fun onChunkClosed(chunkId: Long, file: File, sampleCount: Long, endedAtMs: Long)
         fun onLevel(rms: Float)
+
+        /**
+         * Whether anything is actually going to draw [onLevel]'s value.
+         *
+         * Called on the reader thread, so implementations must be a plain field
+         * read and nothing more. When it returns false the RMS pass is skipped
+         * entirely rather than computed and thrown away — which is the normal
+         * case, because a 24/7 recorder runs with the screen off almost always.
+         */
+        fun wantsLevels(): Boolean = true
+
         fun onFatalError(t: Throwable)
         /** The mic went away (call, assistant, other app). Service decides how to recover. */
         fun onCaptureLost(reason: String)
@@ -177,7 +188,9 @@ class AudioChunker(
                 n > 0 -> {
                     buf.len = n
                     totalSamples.addAndGet(n.toLong())
-                    if (++levelCounter % 4 == 0) callbacks.onLevel(rmsOf(buf.data, n))
+                    if (++levelCounter % 4 == 0 && callbacks.wantsLevels()) {
+                        callbacks.onLevel(rmsOf(buf.data, n))
+                    }
                     if (!filled.offer(buf)) {
                         // Writer is wedged. Drop the newest buffer and record an
                         // honest, visible gap rather than stalling the mic.

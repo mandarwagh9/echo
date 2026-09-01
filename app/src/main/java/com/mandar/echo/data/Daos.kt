@@ -391,6 +391,31 @@ abstract class ChunkDao {
     @Query("SELECT COALESCE(SUM(sampleCount),0) FROM chunks WHERE startedAt BETWEEN :from AND :to")
     abstract suspend fun samplesBetween(from: Long, to: Long): Long
 
+    /**
+     * The local days that actually hold a recording, newest first, as epoch days.
+     *
+     * Buckets in SQL rather than loading every chunk and grouping in Kotlin: a
+     * month of 10-minute chunks is a few thousand rows and this list only needs
+     * the distinct days.
+     *
+     * [utcOffsetMs] is the device's *current* offset from UTC. That is exact for
+     * every day in a zone without daylight saving, and can misplace a recording
+     * made within an hour of a DST boundary into the neighbouring day. It is
+     * only ever used to build the browse list; opening a day still resolves its
+     * bounds through ZoneId, so what you read is correct even when the row you
+     * tapped was listed a day out.
+     */
+    @Query(
+        """
+        SELECT DISTINCT CAST((startedAt + :utcOffsetMs) / 86400000 AS INTEGER) AS day
+        FROM chunks
+        WHERE sampleCount > 0
+        ORDER BY day DESC
+        LIMIT :limit
+        """
+    )
+    abstract fun recordedDays(utcOffsetMs: Long, limit: Int = 180): Flow<List<Long>>
+
     @Query("DELETE FROM chunks")
     abstract suspend fun deleteAll()
 }

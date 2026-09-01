@@ -34,6 +34,18 @@ object EchoServiceState {
     private val _freeBytes = MutableStateFlow(0L)
     val freeBytes: StateFlow<Long> = _freeBytes
 
+    /**
+     * Whether a UI is actually on screen to look at any of this.
+     *
+     * Set from [com.mandar.echo.MainActivity]'s START/STOP, and read by the
+     * service to decide whether work that exists purely to feed the interface is
+     * worth doing at all. A 24/7 recorder spends nearly all of its life with the
+     * screen off, so the level meter and the transcription progress bar are, in
+     * the aggregate, the app's most expensive animations of nothing.
+     */
+    private val _uiVisible = MutableStateFlow(false)
+    val uiVisible: StateFlow<Boolean> = _uiVisible
+
     internal fun setRecording(value: Boolean) { _recording.value = value }
     internal fun setLevel(value: Float) { _level.value = value }
     internal fun setPaused(reason: String?) { _pausedReason.value = reason }
@@ -41,4 +53,6 @@ object EchoServiceState {
     internal fun setSessionStart(value: Long?) { _sessionStartedAt.value = value }
     internal fun setChunkStart(value: Long?) { _currentChunkStartedAt.value = value }
     internal fun setFreeBytes(value: Long) { _freeBytes.value = value }
+
+    fun setUiVisible(value: Boolean) { _uiVisible.value = value }
 }

@@ -71,6 +71,16 @@ data class Settings(
     /** Exposed mainly so the pipeline can be exercised end-to-end without waiting 10 minutes. */
     val chunkMinutes: Int = 10,
     val keepAudioAfterTranscription: Boolean = false,
+    /**
+     * Whether the first-run flow has been completed.
+     *
+     * Not merely cosmetic. Onboarding is where consent is given, where the
+     * microphone and notification permissions are asked for, where the battery
+     * optimisation exemption is requested (without which 24/7 capture dies in
+     * Doze overnight), and where the speech model is downloaded. Skipping it
+     * leaves an app that cannot record and cannot transcribe.
+     */
+    val onboardingComplete: Boolean = false,
 )
 
 class EchoSettings(private val context: Context) {
@@ -85,6 +95,7 @@ class EchoSettings(private val context: Context) {
         val SKIP_SILENT = booleanPreferencesKey("skip_silent")
         val CHUNK_MIN = intPreferencesKey("chunk_minutes")
         val KEEP_AUDIO = booleanPreferencesKey("keep_audio")
+        val ONBOARDED = booleanPreferencesKey("onboarding_complete")
         val BACKEND = stringPreferencesKey("stt_backend")
         val SERVER_URL = stringPreferencesKey("stt_server_url")
         val API_KEY = stringPreferencesKey("stt_api_key")
@@ -113,6 +124,7 @@ class EchoSettings(private val context: Context) {
             skipSilentChunks = p[Keys.SKIP_SILENT] ?: true,
             chunkMinutes = p[Keys.CHUNK_MIN] ?: 10,
             keepAudioAfterTranscription = p[Keys.KEEP_AUDIO] ?: false,
+            onboardingComplete = p[Keys.ONBOARDED] ?: false,
         )
     }
 
@@ -164,6 +176,8 @@ class EchoSettings(private val context: Context) {
     }
 
     suspend fun setKeepAudio(keep: Boolean) = edit { it[Keys.KEEP_AUDIO] = keep }
+
+    suspend fun setOnboardingComplete(done: Boolean) = edit { it[Keys.ONBOARDED] = done }
 
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.dataStore.edit(block)

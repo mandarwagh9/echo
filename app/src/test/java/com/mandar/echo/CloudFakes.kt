@@ -393,6 +393,21 @@ internal class FakeChunkDao : ChunkDao() {
     override suspend fun samplesBetween(from: Long, to: Long): Long =
         rows.values.filter { it.startedAt in from..to }.sumOf { it.sampleCount }
 
+    /**
+     * Mirrors the statement, `sampleCount > 0` included: a chunk that was opened
+     * and never written to is a row in the table but is not a day you recorded,
+     * and a fake that listed it anyway would hide that.
+     */
+    override fun recordedDays(utcOffsetMs: Long, limit: Int): Flow<List<Long>> =
+        flowOf(
+            rows.values
+                .filter { it.sampleCount > 0 }
+                .map { (it.startedAt + utcOffsetMs) / 86_400_000L }
+                .distinct()
+                .sortedDescending()
+                .take(limit)
+        )
+
     override suspend fun deleteAll() = rows.clear()
 
     private fun pending() =

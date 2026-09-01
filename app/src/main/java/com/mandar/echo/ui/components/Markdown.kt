@@ -1,15 +1,20 @@
 package com.mandar.echo.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -66,15 +71,19 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                         .padding(bottom = 7.dp)
                         .semantics(mergeDescendants = true) { }
                 ) {
-                    Text(
-                        "—",
-                        color = colors.faint,
-                        style = MaterialTheme.typography.bodyLarge,
-                        // Decoration. Without this every bullet is read aloud as
-                        // "dash" before the sentence that matters.
-                        modifier = Modifier.clearAndSetSemantics { },
+                    // A drawn dot rather than a typed glyph. It was an em dash,
+                    // which is decoration doing a bullet's job, and it is also
+                    // the one character a screen reader reads aloud as "dash"
+                    // before the sentence that actually matters.
+                    Box(
+                        Modifier
+                            .padding(top = 9.dp)
+                            .size(4.dp)
+                            .clip(CircleShape)
+                            .background(colors.faint)
+                            .clearAndSetSemantics { },
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(12.dp))
                     Text(
                         inline(line.removePrefix("- "), colors.foreground),
                         style = MaterialTheme.typography.bodyLarge,

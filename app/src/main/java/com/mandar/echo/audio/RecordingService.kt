@@ -20,6 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -30,6 +33,15 @@ private const val TAG = "RecordingService"
 
 /** Warn once the backlog passes roughly two hours of un-transcribed audio. */
 private const val BACKLOG_WARN_CHUNKS = 12
+
+/**
+ * How often the housekeeping loop runs.
+ *
+ * Was 15 s. Nothing it checks moves at that speed — free space, the pending
+ * backlog and the dropped-sample counter are all slow — and at 15 s it was the
+ * single most frequent scheduled wakeup in a service designed to run for days.
+ */
+private const val MONITOR_INTERVAL_MS = 60_000L
 
 class RecordingService : Service() {
 
@@ -64,6 +76,9 @@ class RecordingService : Service() {
     @Volatile private var monitorsStarted = false
 
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    /** Last (title, body) actually posted, so identical re-posts are skipped. */
+    private var lastNotification: Pair<String, String>? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -147,8 +162,6 @@ class RecordingService : Service() {
             return
         }
 
-        acquireWakeLock()
-
         val cfg = runBlocking { app.settings.current() }
         val dir = File(filesDir, "chunks").apply { mkdirs() }
 
@@ -194,6 +207,11 @@ class RecordingService : Service() {
 
                 override fun onLevel(rms: Float) = EchoServiceState.setLevel(rms)
 
+                // Read on the reader thread, so it must stay a plain volatile
+                // read. It spares that thread the RMS pass and the UI layer a
+                // 64-element list allocation every second of a screen-off day.
+                override fun wantsLevels(): Boolean = EchoServiceState.uiVisible.value
+
                 override fun onFatalError(t: Throwable) {
                     Log.e(TAG, "capture fatal", t)
                     EchoServiceState.setPaused(t.message ?: "Recording failed")
@@ -209,6 +227,10 @@ class RecordingService : Service() {
         ).also { it.start() }
 
         if (chunker?.isRunning == true) {
+            // Acquired here rather than before start(): a wake lock taken on the
+            // way to a capture that never began is held until shutdown() with
+            // nothing recording behind it.
+            acquireWakeLock()
             restartAttempt = 0
             EchoServiceState.setRecording(true)
             EchoServiceState.setPaused(null)
@@ -231,6 +253,14 @@ class RecordingService : Service() {
         val wait = delays[restartAttempt.coerceAtMost(delays.lastIndex)]
         restartAttempt++
 
+        // The mic is gone, so the indefinite lock is now pinning the CPU awake for
+        // nothing. It cannot simply be dropped either: coroutine delay() does not
+        // wake a suspended device, and a recorder that resumes at the next
+        // maintenance window instead of in 2 s loses the audio in between. So the
+        // lock is re-taken bounded by the backoff itself, which cannot leak.
+        releaseWakeLock()
+        acquireWakeLock(timeoutMs = wait + 5_000)
+
         updateNotification("Paused", "Microphone unavailable — retrying")
         scope.launch {
             delay(wait)
@@ -246,12 +276,19 @@ class RecordingService : Service() {
         monitorsStarted = true
 
         scope.launch {
+            var tick = 0
             while (true) {
-                delay(15_000)
+                delay(MONITOR_INTERVAL_MS)
                 if (stopping) return@launch
 
-                val free = freeBytes()
-                EchoServiceState.setFreeBytes(free)
+                // statfs is a syscall against the filesystem, and free space does
+                // not move fast: capture writes 32 KB/s, so a minute of drift is
+                // under 2 MB against a threshold with far more headroom than that.
+                val free = if (tick++ % 2 == 0 || diskPaused) {
+                    freeBytes().also { EchoServiceState.setFreeBytes(it) }
+                } else {
+                    EchoServiceState.freeBytes.value
+                }
                 chunker?.let { EchoServiceState.setDropped(it.dropped) }
 
                 if (!diskPaused && free < DiskSpace.MIN_FREE_BYTES) {
@@ -259,6 +296,10 @@ class RecordingService : Service() {
                     diskPaused = true
                     chunker?.stop()
                     chunker = null
+                    // Nothing is being captured and nothing will be until the user
+                    // frees space, which is not a 30-second wait. Sleeping is
+                    // correct here; the loop resumes on the next device wake.
+                    releaseWakeLock()
                     EchoServiceState.setRecording(false)
                     EchoServiceState.setPaused("Storage almost full")
                     updateNotification("Paused", "Free up space to resume recording")
@@ -292,17 +333,33 @@ class RecordingService : Service() {
             }
         }
 
-        // Keeps the whisper progress bar in the UI moving.
+        // Keeps the whisper progress bar moving — and nothing else. It used to run
+        // at 2 Hz for the life of the service whether or not a transcription was
+        // running and whether or not anyone was looking, which is ~172,000 wakeups
+        // a day to animate a bar on a screen that is off. Both flows are
+        // conflated first so the pump suspends outright rather than polling to
+        // discover it has nothing to do.
         scope.launch {
-            while (true) {
-                delay(500)
-                app.pipeline.refreshProgress()
-            }
+            combine(
+                EchoServiceState.uiVisible,
+                app.pipeline.state,
+            ) { visible, pipeline -> visible && pipeline.busy }
+                .distinctUntilChanged()
+                .collectLatest { active ->
+                    if (!active) return@collectLatest
+                    while (true) {
+                        delay(500)
+                        app.pipeline.refreshProgress()
+                    }
+                }
         }
     }
 
     private fun shutdown() {
         stopping = true
+        // The notification is about to be removed, so the memo must not suppress
+        // an identical string on the next start.
+        lastNotification = null
         EchoServiceState.setRecording(false)
         EchoServiceState.setSessionStart(null)
         EchoServiceState.setChunkStart(null)
@@ -322,6 +379,7 @@ class RecordingService : Service() {
         body: String,
         useMicrophoneType: Boolean,
     ): Boolean = try {
+        lastNotification = null
         val notification = Notifications.recording(this, title, body)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -341,16 +399,32 @@ class RecordingService : Service() {
         false
     }
 
+    /**
+     * Posts the ongoing notification, skipping the post when nothing about it
+     * changed.
+     *
+     * The monitor loop calls this on every tick, and on a quiet day the string is
+     * identical every time — each redundant post still built a Notification,
+     * crossed a binder to the system server and re-rendered the shade row.
+     */
     private fun updateNotification(title: String, body: String) {
+        val next = title to body
+        if (next == lastNotification) return
+        lastNotification = next
         Notifications.notify(this, Notifications.ID_RECORDING, Notifications.recording(this, title, body))
     }
 
-    private fun acquireWakeLock() {
+    /**
+     * @param timeoutMs when non-null, the lock releases itself after this long.
+     *   Used for the restart backoff, where the alternative to a bounded lock is
+     *   either a leak or a resume deferred to the next maintenance window.
+     */
+    private fun acquireWakeLock(timeoutMs: Long? = null) {
         if (wakeLock?.isHeld == true) return
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Echo::capture").apply {
             setReferenceCounted(false)
-            acquire()
+            if (timeoutMs == null) acquire() else acquire(timeoutMs)
         }
     }
 

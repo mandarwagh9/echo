@@ -40,6 +40,10 @@ object Format {
     fun duration(ms: Long): String {
         val minutes = (ms / 60_000).toInt()
         return when {
+            // Nothing at all is not "less than a minute". Home reads
+            // "<1 min captured / 0 words" on a day it has recorded nothing,
+            // which claims a recording that does not exist.
+            ms <= 0L -> "0 min"
             minutes < 1 -> "<1 min"
             minutes < 60 -> "$minutes min"
             minutes % 60 == 0 -> "${minutes / 60} h"
