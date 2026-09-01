@@ -27,4 +27,25 @@ local.properties
 # here untracked -- along with the passwords that open it.
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.pem
+*.key
 keystore.properties
+
+# Anything else that has ever been used to carry a credential. The repo is
+# public now, so the cost of a mistaken `git add -A` is a rotation and a rewrite
+# of history, not an "oops". These patterns cost nothing and are the cheap half
+# of never having that day.
+.env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+sa.json
+id_rsa
+id_ed25519
+
+# Python bytecode. Regenerated on every run and was tracked by accident.
+__pycache__/
+*.pyc
