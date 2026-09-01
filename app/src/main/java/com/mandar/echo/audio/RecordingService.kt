@@ -1,6 +1,7 @@
 package com.mandar.echo.audio
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -415,10 +416,19 @@ class RecordingService : Service() {
     }
 
     /**
+     * Lint objects to the untimed branch, and for almost any app it would be
+     * right. Here the untimed lock *is* the product: this is a recorder that is
+     * meant to be holding the microphone open at 4 a.m., and a timeout on it
+     * would be an alarm clock set to stop recording. What lint is actually
+     * guarding against is a lock outliving the work, which is the bug that was
+     * here and is now fixed a different way: the lock is taken only once capture
+     * is confirmed running and dropped the moment it stops.
+     *
      * @param timeoutMs when non-null, the lock releases itself after this long.
      *   Used for the restart backoff, where the alternative to a bounded lock is
      *   either a leak or a resume deferred to the next maintenance window.
      */
+    @SuppressLint("WakelockTimeout")
     private fun acquireWakeLock(timeoutMs: Long? = null) {
         if (wakeLock?.isHeld == true) return
         val pm = getSystemService(POWER_SERVICE) as PowerManager

@@ -259,7 +259,16 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
      * ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is the one that shows a
      * one-tap prompt. If the OEM has removed it (some do), fall back to the
      * settings list, which is a longer road but is always present.
+     *
+     * **This is why Echo cannot be published on Google Play.** Lint flags it
+     * correctly: requesting the exemption directly violates Play's content
+     * policy, which allows it only for a short list of app types a personal
+     * journal is not on. The suppression records a decision rather than hiding a
+     * problem. Echo is distributed as a sideloaded APK, and without the
+     * exemption a 24/7 recorder simply stops recording overnight, which is not a
+     * degraded version of the product but the absence of it.
      */
+    @android.annotation.SuppressLint("BatteryLife")
     fun batteryExemptionIntent(context: Context): android.content.Intent {
         val direct = android.content.Intent(
             android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,

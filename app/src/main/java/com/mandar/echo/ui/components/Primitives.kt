@@ -676,14 +676,28 @@ fun ChoiceRow(
                 Text(body, style = MaterialTheme.typography.bodySmall, color = colors.faint)
             }
         }
-        if (selected) {
-            Spacer(Modifier.width(12.dp))
-            Icon(
-                Icons.Default.Check,
-                contentDescription = null,
-                tint = colors.accent,
-                modifier = Modifier.size(19.dp),
-            )
+        // A checkbox shows its box whether or not it is ticked. Unticked, a
+        // radio row is legible from the alternatives beside it, but a lone
+        // consent row with no indicator is just a bordered paragraph, and the
+        // one in onboarding gates the button that lets you past the screen.
+        when {
+            selected -> {
+                Spacer(Modifier.width(12.dp))
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = null,
+                    tint = colors.accent,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+            role == Role.Checkbox -> {
+                Spacer(Modifier.width(12.dp))
+                Box(
+                    Modifier
+                        .size(19.dp)
+                        .border(1.5.dp, colors.faint, EchoShapes.chip)
+                )
+            }
         }
     }
 }
